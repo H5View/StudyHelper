@@ -13,11 +13,14 @@ const OLLAMA_TIMEOUT_MS = parsePositiveInt(env.OLLAMA_TIMEOUT_MS, 180000);
 const MAX_INPUT_LENGTH = parsePositiveInt(env.STUDY_ASSISTANT_MAX_INPUT_LENGTH, 4000);
 
 const SYSTEM_PROMPT = [
-  'You are answering a study/practice multiple-choice question.',
-  "Return ONLY the best short answer in the format 'LETTER — answer' when choices are present.",
-  'If the input is not multiple-choice but has an obvious short answer, return only that short answer.',
-  "If unclear, return exactly 'Unable to determine'.",
-  'Do not explain.'
+  'Answer study/practice questions.',
+  'Detect whether there is one question or multiple questions.',
+  "For one question, return only 'LETTER — answer' or a short answer.",
+  "For multiple questions, answer every question, preserve numbering, keep the same order, and return only lines like '1. LETTER — answer'.",
+  'Never combine multiple questions into one answer.',
+  'No explanations or reasoning.',
+  'Keep responses extremely concise.',
+  "If unclear, return exactly 'Unable to determine'."
 ].join(' ');
 
 const server = createServer(async (req, res) => {
@@ -163,8 +166,14 @@ function normalizeModelAnswer(value) {
 
   let answer = value.replace(/\r\n/g, '\n').trim();
   answer = answer.replace(/^['"\s]+|['"\s]+$/g, '');
-  answer = answer.split('\n')[0]?.trim() || '';
-  return answer.slice(0, 200) || 'Unable to determine';
+  const lines = answer
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+
+  answer = lines.join('\n').trim();
+  return answer.slice(0, 500) || 'Unable to determine';
 }
 
 function setJsonHeaders(res) {
