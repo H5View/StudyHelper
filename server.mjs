@@ -11,6 +11,82 @@ const OLLAMA_BASE_URL = (env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replac
 const OLLAMA_MODEL = env.OLLAMA_MODEL || 'gemma4:latest';
 const OLLAMA_TIMEOUT_MS = parsePositiveInt(env.OLLAMA_TIMEOUT_MS, 180000);
 const MAX_INPUT_LENGTH = parsePositiveInt(env.STUDY_ASSISTANT_MAX_INPUT_LENGTH, 4000);
+const VALID_OUTPUT_MODES = new Set(['mac', 'windows', 'both']);
+const VIEWER_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StudyHelper Viewer</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: linear-gradient(180deg, #111827, #0f172a);
+      color: #f8fafc;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .card {
+      width: min(720px, 100%);
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 18px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+      padding: 20px;
+    }
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      font-size: 12px;
+      color: #94a3b8;
+      margin-bottom: 12px;
+    }
+    .answer {
+      white-space: pre-wrap;
+      font-size: clamp(24px, 4vw, 38px);
+      line-height: 1.3;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="meta">
+      <div id="updated">Waiting for answer…</div>
+      <div id="mode"></div>
+    </div>
+    <div class="answer" id="answer">No answer yet</div>
+  </div>
+  <script>
+    let lastTimestamp = '';
+    async function refresh() {
+      try {
+        const response = await fetch('/latest-answer', { cache: 'no-store' });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.timestamp === lastTimestamp) return;
+        lastTimestamp = data.timestamp || '';
+        document.getElementById('answer').textContent = data.answer || 'No answer yet';
+        document.getElementById('updated').textContent = data.timestamp ? 'Updated: ' + new Date(data.timestamp).toLocaleString() : 'Waiting for answer…';
+        document.getElementById('mode').textContent = data.outputMode ? 'Mode: ' + data.outputMode : '';
+      } catch {}
+    }
+    refresh();
+    setInterval(refresh, 750);
+  </script>
+</body>
+</html>`;
+
+let latestAnswerState = {
+  answer: '',
+  timestamp: null,
+  outputMode: null
+};
 
 const SYSTEM_PROMPT = [
   'Answer study/practice questions.',
@@ -36,6 +112,17 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    if (req.method === 'GET' && req.url === '/latest-answer') {
+      return sendJson(res, 200, latestAnswerState);
+    }
+
+    if (req.method === 'GET' && req.url === '/viewer') {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(VIEWER_HTML);
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/study-answer') {
       if (!isAuthorized(req)) {
         return sendJson(res, 401, { error: 'Unauthorized' });
@@ -55,7 +142,15 @@ const server = createServer(async (req, res) => {
         });
       }
 
+      const outputMode = normalizeOutputMode(body.outputMode);
       const answer = await generateAnswer(text);
+      if (outputMode === 'windows' || outputMode === 'both') {
+        latestAnswerState = {
+          answer,
+          timestamp: new Date().toISOString(),
+          outputMode
+        };
+      }
       return sendJson(res, 200, { answer });
     }
 
@@ -157,6 +252,15 @@ function isAuthorized(req) {
 
 function normalizeInput(value) {
   return value.replace(/\r\n/g, '\n').replace(/[ \t]+\n/g, '\n').trim();
+}
+
+function normalizeOutputMode(value) {
+  if (typeof value !== 'string') {
+    return 'mac';
+  }
+
+  const mode = value.trim().toLowerCase();
+  return VALID_OUTPUT_MODES.has(mode) ? mode : 'mac';
 }
 
 function normalizeModelAnswer(value) {

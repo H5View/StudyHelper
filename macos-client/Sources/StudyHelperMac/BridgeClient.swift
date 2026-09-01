@@ -10,6 +10,11 @@ private struct StudyAnswerResponse: Decodable {
     let answer: String
 }
 
+private struct StudyAnswerRequest: Encodable {
+    let text: String
+    let outputMode: String
+}
+
 private struct BridgeErrorResponse: Decodable {
     let error: String
 }
@@ -52,7 +57,7 @@ struct BridgeClient {
         return try JSONDecoder().decode(HealthStatus.self, from: data)
     }
 
-    func fetchStudyAnswer(for rawText: String) async throws -> String {
+    func fetchStudyAnswer(for rawText: String, outputMode: AnswerDisplayMode) async throws -> String {
         let text = normalizeSelection(rawText)
         guard !text.isEmpty else {
             throw BridgeClientError.requestFailed
@@ -68,9 +73,9 @@ struct BridgeClient {
         request.timeoutInterval = configuration.studyAnswerRequestTimeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(configuration.studyToken, forHTTPHeaderField: "X-Study-Assistant-Token")
-        request.httpBody = try JSONEncoder().encode(["text": text])
+        request.httpBody = try JSONEncoder().encode(StudyAnswerRequest(text: text, outputMode: outputMode.rawValue))
 
-        debugLog("study-answer request started chars=\(text.count) timeout=\(Int(configuration.studyAnswerRequestTimeout))s")
+        debugLog("study-answer request started chars=\(text.count) timeout=\(Int(configuration.studyAnswerRequestTimeout))s mode=\(outputMode.rawValue)")
 
         let (data, response) = try await perform(request, kind: .studyAnswer)
         let httpResponse = try requireHTTPResponse(response)

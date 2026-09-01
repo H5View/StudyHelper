@@ -1,6 +1,10 @@
 import AppKit
 import Foundation
 
+private enum DefaultsKey {
+    static let answerDisplayMode = "answerDisplayMode"
+}
+
 @MainActor
 final class AppController: NSObject {
     private let configuration = AppConfiguration()
@@ -10,9 +14,16 @@ final class AppController: NSObject {
     private var hotKeyMonitor: HotKeyMonitor?
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
+    private var answerDisplayMenuItem: NSMenuItem?
     private var activeRequest: Task<Void, Never>?
     private var latestRequestID = UUID()
     private var lastHotKeyTime = Date.distantPast
+    private var answerDisplayMode = UserDefaults.standard.answerDisplayMode {
+        didSet {
+            UserDefaults.standard.answerDisplayMode = answerDisplayMode
+            refreshAnswerDisplayMenu()
+        }
+    }
 
     func start() {
         setupStatusItem()
@@ -54,6 +65,11 @@ final class AppController: NSObject {
             keyEquivalent: ""
         ).target = self
 
+        let answerDisplayItem = NSMenuItem(title: "Answer Display", action: nil, keyEquivalent: "")
+        answerDisplayItem.submenu = makeAnswerDisplayMenu()
+        menu.addItem(answerDisplayItem)
+        self.answerDisplayMenuItem = answerDisplayItem
+
         menu.addItem(.separator())
 
         menu.addItem(
@@ -65,6 +81,33 @@ final class AppController: NSObject {
         item.menu = menu
         self.statusItem = item
         self.statusMenuItem = statusItem
+        refreshAnswerDisplayMenu()
+    }
+
+    private func makeAnswerDisplayMenu() -> NSMenu {
+        let submenu = NSMenu(title: "Answer Display")
+
+        for mode in [AnswerDisplayMode.mac, .windows] {
+            let item = NSMenuItem(
+                title: mode.menuTitle,
+                action: #selector(selectAnswerDisplayMode(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = mode.rawValue
+            submenu.addItem(item)
+        }
+
+        return submenu
+    }
+
+    private func refreshAnswerDisplayMenu() {
+        guard let items = answerDisplayMenuItem?.submenu?.items else { return }
+
+        for item in items {
+            let rawValue = item.representedObject as? String
+            item.state = rawValue == answerDisplayMode.rawValue ? .on : .off
+        }
     }
 
     private func handleHotKey() {
@@ -76,9 +119,14 @@ final class AppController: NSObject {
         lastHotKeyTime = now
         latestRequestID = UUID()
         let requestID = latestRequestID
+        let outputMode = answerDisplayMode
 
         activeRequest?.cancel()
-        popupController.showLoading()
+        if outputMode.sendsPopupToMac {
+            popupController.showLoading()
+        } else {
+            popupController.dismiss()
+        }
         updateStatus(text: "Looking up answer…")
 
         activeRequest = Task { [weak self] in
@@ -88,12 +136,16 @@ final class AppController: NSObject {
                 let selectedText = try await self.selectionCaptureService.captureSelectedText()
                 try Task.checkCancellation()
 
-                let answer = try await self.bridgeClient.fetchStudyAnswer(for: selectedText)
+                let answer = try await self.bridgeClient.fetchStudyAnswer(for: selectedText, outputMode: outputMode)
                 try Task.checkCancellation()
 
                 await MainActor.run {
                     guard self.latestRequestID == requestID else { return }
-                    self.popupController.showMessage(answer, autoDismissAfter: self.configuration.popupDuration)
+                    if outputMode.sendsPopupToMac {
+                        self.popupController.showMessage(answer, autoDismissAfter: self.configuration.popupDuration)
+                    } else {
+                        self.popupController.dismiss()
+                    }
                     self.updateStatus(text: "Ready")
                 }
             } catch is CancellationError {
@@ -133,6 +185,18 @@ final class AppController: NSObject {
     }
 
     @objc
+    private func selectAnswerDisplayMode(_ sender: NSMenuItem) {
+        guard
+            let rawValue = sender.representedObject as? String,
+            let mode = AnswerDisplayMode(rawValue: rawValue)
+        else {
+            return
+        }
+
+        answerDisplayMode = mode
+    }
+
+    @objc
     private func testConnection() {
         updateStatus(text: "Testing connection…")
         popupController.showLoading(text: "Checking…")
@@ -164,5 +228,23 @@ final class AppController: NSObject {
     @objc
     private func quitApp() {
         NSApp.terminate(nil)
+    }
+}
+
+private extension UserDefaults {
+    var answerDisplayMode: AnswerDisplayMode {
+        get {
+            guard
+                let rawValue = string(forKey: DefaultsKey.answerDisplayMode),
+                let mode = AnswerDisplayMode(rawValue: rawValue)
+            else {
+                return .mac
+            }
+
+            return mode
+        }
+        set {
+            set(newValue.rawValue, forKey: DefaultsKey.answerDisplayMode)
+        }
     }
 }

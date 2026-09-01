@@ -6,6 +6,8 @@ Minimal standalone Node.js bridge for sending selected study text to a local Oll
 
 - `GET /health` for bridge and Ollama reachability checks
 - `POST /study-answer` protected by `X-Study-Assistant-Token`
+- `GET /latest-answer` for the Windows-side viewer state
+- `GET /viewer` for the Windows-side local browser viewer
 - Standalone Node.js server using built-in APIs only
 - Configurable host, port, model, timeout, and input length
 
@@ -30,6 +32,8 @@ Or use:
 ```bat
 start-study-server.cmd
 ```
+
+The helper opens the local Windows answer viewer automatically. Leave that browser tab open while using `Windows PC` or `Both` output mode from the Mac.
 
 ## Environment
 
@@ -72,7 +76,8 @@ Body:
 
 ```json
 {
-  "text": "Which planet is closest to the Sun?\nA. Venus\nB. Mercury\nC. Earth\nD. Mars"
+  "text": "Which planet is closest to the Sun?\nA. Venus\nB. Mercury\nC. Earth\nD. Mars",
+  "outputMode": "windows"
 }
 ```
 
@@ -91,6 +96,40 @@ If the input is unclear, the bridge returns:
   "answer": "Unable to determine"
 }
 ```
+
+`outputMode` supports:
+
+- `mac`
+- `windows`
+- `both`
+
+Requests without `outputMode` still default to `mac`.
+
+### `GET /latest-answer`
+
+Returns the latest Windows-viewer answer stored in memory.
+
+Example:
+
+```json
+{
+  "answer": "1. B — Mercury",
+  "timestamp": "2026-08-31T16:00:00.000Z",
+  "outputMode": "windows"
+}
+```
+
+### `GET /viewer`
+
+Serves a tiny local viewer page that polls `/latest-answer` and shows the newest Windows-side answer.
+
+On the Windows PC, open this page if it is not already open:
+
+```text
+http://127.0.0.1:8788/viewer
+```
+
+This is an always-open answer panel, rather than a Windows notification toast. It updates shortly after each Mac request sent in `windows` or `both` mode.
 
 ## Firewall
 

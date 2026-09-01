@@ -34,7 +34,15 @@ Path:
 - `Status`
 - `Test Connection`
 - `Open Accessibility Settings`
+- `Answer Display`
 - `Quit`
+
+### Answer Display
+
+- `MacBook`: answer popup appears only on the Mac
+- `Windows PC`: answer is sent to the Windows viewer and the Mac suppresses the success popup
+
+The selected mode is saved with `UserDefaults` and survives app restarts.
 
 ## Hotkey
 

@@ -24,8 +24,16 @@ if defined LAN_IP (
 )
 
 echo.
-echo Starting server on port 8788...
-echo Keep this window open while using the bridge.
+echo Starting the bridge in a dedicated window...
+echo The Windows answer viewer will open automatically.
+echo Keep the bridge and viewer windows open while using the bridge.
 echo.
 
-npm.cmd start
+start "StudyHelper Bridge" cmd /k "cd /d ""%~dp0"" ^&^& npm.cmd start"
+
+timeout /t 2 /nobreak >nul
+start "StudyHelper Viewer" "http://127.0.0.1:8788/viewer"
+
+echo.
+echo Bridge started. The viewer shows every answer sent in Windows PC or Both mode.
+pause
