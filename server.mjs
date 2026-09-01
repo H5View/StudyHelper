@@ -52,6 +52,14 @@ const VIEWER_HTML = `<!doctype html>
       line-height: 1.3;
       font-weight: 700;
     }
+    .answer.working {
+      color: #93c5fd;
+      animation: pulse 1.1s ease-in-out infinite alternate;
+    }
+    @keyframes pulse {
+      from { opacity: 0.55; }
+      to { opacity: 1; }
+    }
   </style>
 </head>
 <body>
@@ -71,7 +79,9 @@ const VIEWER_HTML = `<!doctype html>
         const data = await response.json();
         if (data.timestamp === lastTimestamp) return;
         lastTimestamp = data.timestamp || '';
-        document.getElementById('answer').textContent = data.answer || 'No answer yet';
+        const answer = document.getElementById('answer');
+        answer.textContent = data.answer || 'No answer yet';
+        answer.classList.toggle('working', data.status === 'working');
         document.getElementById('updated').textContent = data.timestamp ? 'Updated: ' + new Date(data.timestamp).toLocaleString() : 'Waiting for answer…';
         document.getElementById('mode').textContent = data.outputMode ? 'Mode: ' + data.outputMode : '';
       } catch {}
@@ -85,7 +95,8 @@ const VIEWER_HTML = `<!doctype html>
 let latestAnswerState = {
   answer: '',
   timestamp: null,
-  outputMode: null
+  outputMode: null,
+  status: 'idle'
 };
 
 const SYSTEM_PROMPT = [
@@ -143,13 +154,24 @@ const server = createServer(async (req, res) => {
       }
 
       const outputMode = normalizeOutputMode(body.outputMode);
-      const answer = await generateAnswer(text);
-      if (outputMode === 'windows' || outputMode === 'both') {
-        latestAnswerState = {
-          answer,
-          timestamp: new Date().toISOString(),
-          outputMode
-        };
+      const shouldShowOnWindows = outputMode === 'windows' || outputMode === 'both';
+
+      if (shouldShowOnWindows) {
+        setLatestAnswerState('Finding answer...', outputMode, 'working');
+      }
+
+      let answer;
+      try {
+        answer = await generateAnswer(text);
+      } catch (error) {
+        if (shouldShowOnWindows) {
+          setLatestAnswerState('Request failed', outputMode, 'error');
+        }
+        throw error;
+      }
+
+      if (shouldShowOnWindows) {
+        setLatestAnswerState(answer, outputMode, 'ready');
       }
       return sendJson(res, 200, { answer });
     }
@@ -261,6 +283,15 @@ function normalizeOutputMode(value) {
 
   const mode = value.trim().toLowerCase();
   return VALID_OUTPUT_MODES.has(mode) ? mode : 'mac';
+}
+
+function setLatestAnswerState(answer, outputMode, status) {
+  latestAnswerState = {
+    answer,
+    timestamp: new Date().toISOString(),
+    outputMode,
+    status
+  };
 }
 
 function normalizeModelAnswer(value) {

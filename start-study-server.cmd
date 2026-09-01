@@ -25,15 +25,15 @@ if defined LAN_IP (
 
 echo.
 echo Starting the bridge in a dedicated window...
-echo The Windows answer viewer will open automatically.
-echo Keep the bridge and viewer windows open while using the bridge.
+echo The Windows answer popup will start automatically.
+echo Keep the bridge window open while using the bridge.
 echo.
 
 start "StudyHelper Bridge" cmd /k "cd /d ""%~dp0"" ^&^& npm.cmd start"
 
 timeout /t 2 /nobreak >nul
-start "StudyHelper Viewer" "http://127.0.0.1:8788/viewer"
+start "StudyHelper Popup" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0windows-answer-popup.ps1"
 
 echo.
-echo Bridge started. The viewer shows every answer sent in Windows PC or Both mode.
+echo Bridge started. Windows PC and Both mode answers will appear in a popup.
 pause

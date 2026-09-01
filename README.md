@@ -33,7 +33,7 @@ Or use:
 start-study-server.cmd
 ```
 
-The helper opens the local Windows answer viewer automatically. Leave that browser tab open while using `Windows PC` or `Both` output mode from the Mac.
+The helper starts a native Windows answer popup automatically. In `Windows PC` or `Both` mode, it appears with `Finding answer...` when a request begins, then shows the completed answer. It closes itself after a few seconds; press Escape to close it sooner.
 
 ## Environment
 
@@ -129,7 +129,7 @@ On the Windows PC, open this page if it is not already open:
 http://127.0.0.1:8788/viewer
 ```
 
-This is an always-open answer panel, rather than a Windows notification toast. It updates shortly after each Mac request sent in `windows` or `both` mode.
+This optional browser viewer updates shortly after each Mac request sent in `windows` or `both` mode. The default `start-study-server.cmd` launcher uses the native Windows popup instead.
 
 ## Firewall
 
