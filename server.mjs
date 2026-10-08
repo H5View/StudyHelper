@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
-import { getThinkingDecision, matchAnswerToChoices, redactInputForDebug, resolveAnswer } from './study-answer-logic.mjs';
+import { extractFillInAnswer, getThinkingDecision, matchAnswerToChoices, redactInputForDebug, resolveAnswer } from './study-answer-logic.mjs';
 import { readOllamaEventStream } from './ollama-stream.mjs';
 
 const env = loadEnvFile();
@@ -258,15 +258,26 @@ async function generateAnswer(text, handlers = {}) {
   }
   try {
     attempts += 1;
+    const onModelContent = questionType === 'fill-in-the-blank' ? undefined : handlers.onContent;
     const firstAnswer = await requestModel(
       text,
       buildSystemPrompt(questionType, text),
       requestId,
       'initial',
       think,
-      handlers.onContent,
+      onModelContent,
       OLLAMA_NUM_PREDICT
     );
+    if (questionType === 'fill-in-the-blank') {
+      const formattedAnswer = extractFillInAnswer(firstAnswer, text);
+      if (formattedAnswer !== firstAnswer) {
+        console.log(`study-answer fill formatted requestId=${requestId} normalized=true`);
+      }
+      // Hold raw generated text back until the completed-sentence fallback has
+      // been reduced to the missing span, so neither UI can flash the question.
+      handlers.onContent?.(formattedAnswer, formattedAnswer, 'formatted');
+      return formattedAnswer;
+    }
     if (questionType !== 'multiple-choice') {
       return firstAnswer;
     }
@@ -321,14 +332,14 @@ function buildSystemPrompt(questionType, text) {
   }
 
   if (questionType === 'fill-in-the-blank') {
-    const explanationRequested = /\b(?:explain|why|how|show (?:your )?work|give (?:an )?explanation)\b/i.test(text);
     return [
       ...shared,
       'This is a fill-in-the-blank question. Supply the missing word or shortest correct phrase directly.',
       'Do not choose an answer letter or invent answer choices.',
-      explanationRequested
-        ? 'The question requests an explanation, so give the missing word or phrase first, followed by a concise explanation.'
-        : 'Return only the missing word or phrase. Do not add an explanation, preamble, uncertainty disclaimer, or follow-up advice.'
+      'Return only the missing word or phrase; never repeat the question or return the completed sentence.',
+      'Do not include an explanation, introduction, quotation marks, or labels.',
+      'For multiple blanks, give the missing terms in order separated by semicolons.',
+      'Preserve capitalization when the missing text starts a sentence.'
     ].join(' ');
   }
 

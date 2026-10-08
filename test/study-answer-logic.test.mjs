@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   detectQuestionType,
+  extractFillInAnswer,
   getThinkingDecision,
   isUncertainAnswer,
   matchAnswerToChoices,
@@ -47,6 +48,52 @@ test('fill-in-the-blank and short-answer types do not enable thinking just becau
   assert.equal(detectQuestionType('DNA stands for _'), 'fill-in-the-blank');
   assert.equal(detectQuestionType('What is osmosis?'), 'short-answer');
   assert.equal(getThinkingDecision('What is osmosis?').think, false);
+});
+
+test('fill-in formatting extracts only reliable blank spans at the beginning, middle, or end', () => {
+  assert.equal(
+    extractFillInAnswer(
+      'The powerhouse of the cell is the mitochondrion.',
+      'The powerhouse of the cell is the ____.'
+    ),
+    'mitochondrion'
+  );
+  assert.equal(
+    extractFillInAnswer('DNA stands for deoxyribonucleic acid.', 'DNA stands for ____.'),
+    'deoxyribonucleic acid'
+  );
+  assert.equal(
+    extractFillInAnswer(
+      'Photosynthesis is the process by which plants convert sunlight into chemical energy.',
+      '____ is the process by which plants convert sunlight into chemical energy.'
+    ),
+    'Photosynthesis'
+  );
+  assert.equal(
+    extractFillInAnswer('Plants convert sunlight into chemical energy.', 'Plants convert sunlight into ____ energy.'),
+    'chemical'
+  );
+  assert.equal(
+    extractFillInAnswer(
+      'The two main products of photosynthesis are glucose and oxygen.',
+      'The two main products of photosynthesis are ____ and ____.'
+    ),
+    'glucose; oxygen'
+  );
+  assert.equal(
+    extractFillInAnswer('Answer: “mitochondrion”', 'The powerhouse of the cell is the ____.'),
+    'mitochondrion'
+  );
+  assert.equal(
+    extractFillInAnswer('The answer is: “deoxyribonucleic acid”', 'DNA stands for ____.'),
+    'deoxyribonucleic acid'
+  );
+  const unrelatedAnswer = 'Mitochondrion is the organelle that produces most cellular ATP.';
+  assert.equal(
+    extractFillInAnswer(unrelatedAnswer, 'The powerhouse of the cell is the ____.'),
+    unrelatedAnswer,
+    'formatter changed an answer when the missing span could not be identified'
+  );
 });
 
 test('parenthesized and no-space labels are detected as choices', () => {

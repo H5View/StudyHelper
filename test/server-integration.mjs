@@ -26,9 +26,12 @@ const ollama = createServer(async (request, response) => {
     uncertainRetryCase ? 'Ask Google' :
       question.includes('NO_RETRY_FILL') ? 'Unable to determine' :
       question.includes('Option 4: stomata') ? 'stomata' :
-        question.includes('powerhouse of the cell') ? 'mitochondrion' :
-          question.includes('DNA stands for') ? 'deoxyribonucleic acid' :
-            question.includes('convert sunlight into chemical energy') ? 'photosynthesis' :
+        question.includes('powerhouse of the cell') ? 'The powerhouse of the cell is the mitochondrion. It produces most cellular ATP.' :
+          question.includes('DNA stands for') ? 'DNA stands for deoxyribonucleic acid.' :
+            question.startsWith('____ is the process') ? 'Photosynthesis is the process by which plants convert sunlight into chemical energy.' :
+              question.includes('Plants convert sunlight into ____ energy') ? 'Plants convert sunlight into chemical energy.' :
+                question.includes('two main products of photosynthesis') ? 'The two main products of photosynthesis are glucose and oxygen.' :
+                  question.includes('convert sunlight into chemical energy') ? 'The process by which plants convert sunlight into chemical energy is photosynthesis.' :
               question.includes('What is osmosis?') ? 'Osmosis is the movement of water across a selectively permeable membrane.' :
                 'D — stomata. Stomata allow carbon dioxide to enter the leaf.';
 
@@ -114,12 +117,20 @@ try {
   const fillIns = [
     ['The powerhouse of the cell is the _____.', 'mitochondrion'],
     ['DNA stands for ____.', 'deoxyribonucleic acid'],
-    ['The process by which plants convert sunlight into chemical energy is ____.', 'photosynthesis']
+    ['The process by which plants convert sunlight into chemical energy is ____.', 'photosynthesis'],
+    ['____ is the process by which plants convert sunlight into chemical energy.', 'Photosynthesis'],
+    ['Plants convert sunlight into ____ energy.', 'chemical'],
+    ['The two main products of photosynthesis are ____ and ____.', 'glucose; oxygen']
   ];
   for (const [question, expectedAnswer] of fillIns) {
     const before = calls.length;
     const response = await postStream(bridgePort, question);
     assert.equal(response.answer, expectedAnswer);
+    assert.equal(
+      response.events.filter((event) => event.type === 'delta').map((event) => event.content).join(''),
+      expectedAnswer,
+      'stream exposed the model completed sentence instead of only the missing span'
+    );
     assert.equal(calls.length, before + 1, 'fill-in-the-blank question triggered an automatic retry');
     const payload = calls.at(-1);
     assert.equal(payload.think, false, 'straightforward fill-in-the-blank enabled thinking');
@@ -128,6 +139,8 @@ try {
     assert.match(payload.messages[0].content, /This is a fill-in-the-blank question/);
     assert.match(payload.messages[0].content, /Do not choose an answer letter/);
     assert.match(payload.messages[0].content, /Return only the missing word or phrase/);
+    assert.match(payload.messages[0].content, /never repeat the question or return the completed sentence/);
+    assert.match(payload.messages[0].content, /Do not include an explanation, introduction, quotation marks, or labels/);
   }
 
   const noRetryQuestion = 'NO_RETRY_FILL\nFill in the blank: A plant cell wall is primarily made of ____.';
@@ -146,10 +159,10 @@ try {
   const retryQuestion = `RETRY_CASE\nExplain why plants need stomata.\nA) trichomes\nB) internodes\nC) stipules\nD) stomata`;
   const retried = await postStream(bridgePort, retryQuestion);
   assert.equal(retried.answer, 'D — stomata');
-  assert.equal(calls.length, 9, 'uncertain multiple-choice answer should receive exactly one retry');
-  assert.equal(calls[7].think, true, 'complex initial request should permit thinking');
-  assert.equal(calls[8].think, false, 'short retry should disable thinking');
-  assert.equal(calls[8].options.num_predict, 96, 'retry must respect the configured output token limit');
+  assert.equal(calls.length, 12, 'uncertain multiple-choice answer should receive exactly one retry');
+  assert.equal(calls[10].think, true, 'complex initial request should permit thinking');
+  assert.equal(calls[11].think, false, 'short retry should disable thinking');
+  assert.equal(calls[11].options.num_predict, 96, 'retry must respect the configured output token limit');
 
   assert.match(logs, /questionType=multiple-choice .*think=false thinkReason=straightforward-multiple-choice detectedChoices=4/);
   assert.match(logs, /questionType=fill-in-the-blank .*think=false thinkReason=straightforward-fill-in-the-blank detectedChoices=0/);

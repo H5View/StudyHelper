@@ -2,7 +2,8 @@ const CHOICE_HEADING = /^(?:options?|answer choices|choices)\s*:?$/i;
 const LABELLED_CHOICE = /^\s*(?:\(([A-Z])\)|([A-Z])\s*[.)]|([A-Z])\s*[-:])\s*(.*)$/i;
 const NUMBERED_CHOICE = /^\s*option\s+(\d+)\s*[:.)-]\s*(.*)$/i;
 const COMPLEX_CUE = /\b(?:analy[sz]e|compare|contrast|evaluate|justify|explain|infer|deduce|predict|mechanism|multi[- ]step|why|how\s+(?:does|would|can|did|could)|based on (?:the )?(?:data|results|evidence|experiment|passage))\b/i;
-const FILL_IN_CUE = /(?:_+|\.{3,}|…{1,}|\[\s*blank\s*\]|\(\s*blank\s*\)|\bfill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\b|\bcomplete\s+(?:the\s+)?(?:blank|sentence|statement)\b|\b(?:missing|insert|supply)\s+(?:the\s+)?(?:words?|terms?|phrases?)\b|\bmissing\s+terms?\b)/i;
+const FILL_IN_CUE = /(?:_+|\.{3,}|…{1,}|\[\s*(?:blank|\s{2,})\s*\]|\(\s*(?:blank|\s{2,})\s*\)|\bfill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\b|\bcomplete\s+(?:the\s+)?(?:blank|sentence|statement)\b|\b(?:missing|insert|supply)\s+(?:the\s+)?(?:words?|terms?|phrases?)\b|\bmissing\s+terms?\b)/i;
+const BLANK_MARKER = /\\?_+|\.{3,}|…+|\[\s*(?:blank|\s{2,})\s*\]|\(\s*(?:blank|\s{2,})\s*\)/gi;
 const INCOMPLETE_FILL_ENDING = /\b(?:is|are|was|were|stands\s+for|called|known\s+as|equals|means|becomes?|converts?\s+into|results?\s+in|consists?\s+of)\s+(?:the|a|an)?\s*$/i;
 const UNCERTAIN_START = /^\s*(?:unable to determine|cannot determine|can't determine|not enough information|insufficient information|cannot be determined|i (?:do not|don't) know|i am not sure|i'm not sure|ask google|search (?:google|online)|look it up)\b/i;
 
@@ -61,6 +62,48 @@ export function detectQuestionType(text) {
     return 'fill-in-the-blank';
   }
   return 'short-answer';
+}
+
+export function extractFillInAnswer(modelOutput, questionText) {
+  let output = cleanFillAnswer(modelOutput);
+  if (!output) return output;
+
+  const question = String(questionText ?? '').trim();
+  const parts = question.split(BLANK_MARKER);
+  if (parts.length > 1) {
+    const anchors = parts.map((part) => part.trim());
+    const anchorLength = anchors.reduce((total, anchor) => total + anchor.length, 0);
+    const separatedBlanks = anchors.slice(1, -1).every((anchor) => anchor.length >= 2);
+    if (anchorLength >= 8 && separatedBlanks) {
+      let pattern = '^';
+      for (let index = 0; index < anchors.length; index += 1) {
+        pattern += flexibleAnchorPattern(anchors[index]);
+        if (index < anchors.length - 1) {
+          const finalBlankAtEnd = index === anchors.length - 2 && !anchors[index + 1];
+          pattern += finalBlankAtEnd ? '([\\s\\S]+)' : '([\\s\\S]+?)';
+        }
+      }
+      pattern += '[\\s\\S]*$';
+
+      try {
+        const match = output.match(new RegExp(pattern, 'i'));
+        if (match) {
+          const missingParts = match.slice(1).map((part) => cleanExtractedPhrase(part));
+          if (missingParts.every((part) => part && part.length <= 180)) {
+            return missingParts.join('; ');
+          }
+        }
+      } catch {}
+    }
+  }
+
+  const stem = getIncompleteFillStem(question);
+  if (stem && stem.length >= 8 && output.toLocaleLowerCase().startsWith(stem.toLocaleLowerCase())) {
+    const missing = cleanExtractedPhrase(output.slice(stem.length));
+    if (missing && missing.length <= 180) return missing;
+  }
+
+  return output;
 }
 
 export function getThinkingDecision(text, mode = 'auto') {
@@ -213,4 +256,41 @@ function stripAnswerLead(value) {
 
 function normalizeForMatch(value) {
   return value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+function cleanFillAnswer(value) {
+  let answer = String(value ?? '').trim();
+  answer = answer.replace(/^```(?:[\w+-]+)?\s*|\s*```$/g, '').trim();
+  answer = answer.replace(
+    /^(?:(?:the\s+)?answer|(?:the\s+)?missing\s+(?:word|term|phrase)|(?:the\s+)?completed\s+sentence)\s*(?::\s*|[-—–]\s*|\bis\b\s*:?\s*)/i,
+    ''
+  ).trim();
+  if (answer.length >= 2 && ['""', "''", '“”', '‘’', '``'].some(([open, close]) => answer.startsWith(open) && answer.endsWith(close))) {
+    answer = answer.slice(1, -1).trim();
+  }
+  return answer;
+}
+
+function cleanExtractedPhrase(value) {
+  let phrase = String(value ?? '').trim();
+  if (phrase.length > 1 && /[.!?]$/.test(phrase) && !/[.!?]/.test(phrase.slice(0, -1))) {
+    phrase = phrase.slice(0, -1).trimEnd();
+  }
+  return phrase;
+}
+
+function flexibleAnchorPattern(anchor) {
+  return anchor.split(/\s+/).filter(Boolean).map(escapeRegExp).join('\\s+');
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getIncompleteFillStem(question) {
+  return String(question ?? '')
+    .replace(/^\s*(?:fill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\s*:?|complete\s+(?:the\s+)?(?:blank|sentence|statement)\s*:?|missing\s+(?:word|term|phrase)\s*:?)/i, '')
+    .trim()
+    .replace(/[.!?\s]+$/g, '')
+    .trim();
 }
