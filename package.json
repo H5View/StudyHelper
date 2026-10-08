@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs"
+    "check": "node --check server.mjs",
+    "test": "node --test test/study-answer-logic.test.mjs",
+    "test:integration": "node test/server-integration.mjs"
   }
 }

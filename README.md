@@ -18,6 +18,12 @@ Minimal standalone Node.js bridge for sending selected study text to a local Oll
 - `.env.example`
 - `start-study-server.cmd`
 
+## Tests
+
+- `npm test` runs bridge decision, answer matching, redaction, and Ollama stream parsing regressions.
+- `npm run test:integration` runs the bridge against a local mock Ollama endpoint.
+- `cd macos-client && swift run StudyHelperCoreRegression` checks Mac question extraction, labeled and unlabeled choices, and screen-control filtering.
+
 ## Setup
 
 1. Make sure Ollama is running on the Windows PC at `http://127.0.0.1:11434`.
@@ -47,8 +53,10 @@ OLLAMA_MODEL=gemma4:12b-it-q4_K_M
 OLLAMA_NUM_CTX=8192
 OLLAMA_THINKING_MODE=auto
 OLLAMA_KEEP_ALIVE=5m
+OLLAMA_RETRY_NUM_PREDICT=128
 OLLAMA_TIMEOUT_MS=600000
 STUDY_ASSISTANT_MAX_INPUT_LENGTH=16000
+STUDY_ASSISTANT_DEBUG_INPUT=0
 ```
 
 `OLLAMA_NUM_CTX` is sent to Ollama as `options.num_ctx` on every chat request. The default is 8,192 tokens; set it to `4096` in `.env` and restart the bridge if the larger context causes GPU memory pressure. The bridge logs the configured context, Ollama's prompt and generated token counts, estimated context utilization, and request timings. These logs do not include question text or model answers.
@@ -58,6 +66,10 @@ STUDY_ASSISTANT_MAX_INPUT_LENGTH=16000
 `OLLAMA_THINKING_MODE` accepts `auto`, `on`, or `off`. In `auto` mode, straightforward single multiple-choice questions run with `think: false`; open-ended, long, multi-question, or reasoning-heavy prompts use `think: true`. The bridge sends Ollama's top-level `think` field and never displays or logs the model's private thinking output. Set `on` or `off` to override the heuristic.
 
 `OLLAMA_KEEP_ALIVE` is sent as Ollama's `keep_alive` field and defaults to `5m`. Set it to `0` to unload the model after a request or choose a longer duration when you want fewer reloads. Avoid `-1` on a GPU with limited free memory unless you intend to keep the model resident indefinitely.
+
+The bridge prints the selected thinking decision and how many answer choices it detected on each request. `thinkReason=forced-on` means the Windows `.env` sets `OLLAMA_THINKING_MODE=on`; `thinkReason=choices-not-detected` means the received text did not contain a recognized choice group. Set `STUDY_ASSISTANT_DEBUG_INPUT=1` temporarily to print the received text to the bridge console with names in `Name:` fields, emails, URLs, phone numbers, and long numeric IDs redacted. It is off by default; turn it back off after debugging. The bridge never writes this trace to a file itself.
+
+An uncertainty retry runs only when no supplied choice can be matched and the response begins with an uncertainty or search refusal. Retries disable thinking and use `OLLAMA_RETRY_NUM_PREDICT` (128 tokens by default) to avoid another long generation.
 
 Ollama responses stream to the Mac popup and update the Windows viewer as answer text arrives. The existing `/study-answer` endpoint continues to return its JSON response for other clients. Bridge logs report time to first model token, prompt evaluation time, generation time, model load time, Ollama total time, and end-to-end time. Thinking text and screen content are excluded from logs and client output.
 

@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
+import { getThinkingDecision, matchAnswerToChoices, redactInputForDebug, resolveAnswer } from './study-answer-logic.mjs';
+import { readOllamaEventStream } from './ollama-stream.mjs';
 
 const env = loadEnvFile();
 
@@ -14,6 +16,8 @@ const OLLAMA_NUM_CTX = parsePositiveInt(env.OLLAMA_NUM_CTX, 8192);
 const MAX_INPUT_LENGTH = parsePositiveInt(env.STUDY_ASSISTANT_MAX_INPUT_LENGTH, 16000);
 const OLLAMA_KEEP_ALIVE = env.OLLAMA_KEEP_ALIVE || '5m';
 const OLLAMA_THINKING_MODE = normalizeThinkingMode(env.OLLAMA_THINKING_MODE);
+const OLLAMA_RETRY_NUM_PREDICT = parsePositiveInt(env.OLLAMA_RETRY_NUM_PREDICT, 128);
+const DEBUG_INPUT = env.STUDY_ASSISTANT_DEBUG_INPUT === '1';
 const VALID_OUTPUT_MODES = new Set(['mac', 'windows', 'both']);
 const VIEWER_HTML = `<!doctype html>
 <html lang="en">
@@ -104,17 +108,17 @@ let latestAnswerState = {
 let nextStudyRequestId = 0;
 
 const SYSTEM_PROMPT = [
-  'Answer study/practice questions.',
-  'The input may be text recognized from an entire app window. Ignore navigation, menus, buttons, ads, and other interface text; find the visible question and its answer choices.',
+  'Answer the study question using only the text and choices provided.',
+  'Do not browse or recommend outside research.',
+  'Ignore interface text if any remains in the input.',
   'Detect whether there is one question or multiple questions.',
-  "For one question, return only 'LETTER — answer' or a short answer.",
-  "For multiple questions, answer every question, preserve numbering, keep the same order, and return only lines like '1. LETTER — answer'.",
+  'For labeled choices, return only the exact choice label and its choice text, such as D — stomata.',
+  'For choices labeled Option 1, Option 2, and so on, return the selected Option label and exact choice text.',
+  'For choices with no labels, return the exact selected choice text and do not invent a letter.',
+  "For multiple questions, answer each in order on separate lines, using the question number and selected choice label/text when available.",
   'Never combine multiple questions into one answer.',
-  'When answer choices are present, always choose the most plausible choice, even when uncertain. Do not refuse to choose or say the question is unclear if any choice is reasonably plausible.',
-  'If the question is incomplete or partly unreadable, use the visible context and choices to make the best guess.',
-  'No explanations or reasoning.',
-  'Keep responses extremely concise.',
-  'Only say you cannot determine an answer when there are no usable choices and no reasonable answer can be inferred.'
+  'When choices are present, always select the most plausible choice. If wording is incomplete, choose from the visible options.',
+  'Return only the answer. Do not include reasoning, uncertainty disclaimers, or follow-up advice.'
 ].join(' ');
 
 const server = createServer(async (req, res) => {
@@ -242,6 +246,8 @@ server.listen(PORT, HOST, () => {
   console.log(`Ollama context window: ${OLLAMA_NUM_CTX} tokens`);
   console.log(`Ollama keep_alive: ${OLLAMA_KEEP_ALIVE}`);
   console.log(`Ollama thinking mode: ${OLLAMA_THINKING_MODE}`);
+  console.log(`Uncertain-answer retry token limit: ${OLLAMA_RETRY_NUM_PREDICT}`);
+  console.log(`Input debug logging: ${DEBUG_INPUT ? 'enabled (redacted)' : 'disabled'}`);
   console.log(`Maximum input: ${MAX_INPUT_LENGTH} characters`);
   if (lanAddresses.length > 0) {
     console.log(`LAN access: ${lanAddresses.map((address) => `http://${address}:${PORT}`).join(', ')}`);
@@ -252,29 +258,45 @@ async function generateAnswer(text, handlers = {}) {
   const requestId = ++nextStudyRequestId;
   const startedAt = performance.now();
   let attempts = 0;
-  const think = shouldEnableThinking(text);
+  const thinkingDecision = getThinkingDecision(text, OLLAMA_THINKING_MODE);
+  const think = thinkingDecision.think;
 
   console.log(
-    `study-answer started requestId=${requestId} chars=${text.length} num_ctx=${OLLAMA_NUM_CTX} think=${think} keep_alive=${OLLAMA_KEEP_ALIVE}`
+    `study-answer started requestId=${requestId} chars=${text.length} lines=${text.split(/\r?\n/).length} num_ctx=${OLLAMA_NUM_CTX} think=${think} thinkReason=${thinkingDecision.reason} detectedChoices=${thinkingDecision.choiceCount} keep_alive=${OLLAMA_KEEP_ALIVE}`
   );
+  if (DEBUG_INPUT) {
+    console.log(`study input debug requestId=${requestId} text=${JSON.stringify(redactInputForDebug(text))}`);
+  }
   try {
     attempts += 1;
     const firstAnswer = await requestModel(text, SYSTEM_PROMPT, requestId, 'initial', think, handlers.onContent);
-    if (!isUncertainAnswer(firstAnswer)) {
+    const firstResolution = resolveAnswer(firstAnswer, text);
+    if (firstResolution.matchedChoice) {
+      console.log(`study-answer choice matched requestId=${requestId} label=${firstResolution.choice.label}`);
+      return firstResolution.answer;
+    }
+    if (!firstResolution.shouldRetry) {
       return firstAnswer;
     }
 
-    console.log('Model returned an uncertain answer; retrying with best-guess instructions.');
+    console.log(`study-answer retrying requestId=${requestId} reason=uncertain-without-matched-choice`);
     handlers.onRetry?.();
     const bestGuessPrompt = [
-      'Solve the study question again using the input and all visible answer choices.',
-      'You must select the most plausible answer choice whenever choices are present, even if the image text is incomplete or you are uncertain.',
-      'Do not say Unable to determine, do not refuse, and do not explain your uncertainty.',
-      'For multiple questions, answer every question in order with its number and selected letter.'
+      'Choose the most plausible answer from the supplied choices.',
+      'Do not browse, refuse, or add an explanation.',
+      'Return only the selected choice label and exact choice text, or the exact choice text for unlabeled choices.'
     ].join(' ');
     attempts += 1;
-    const retryThink = OLLAMA_THINKING_MODE === 'off' ? false : true;
-    return await requestModel(text, bestGuessPrompt, requestId, 'best-guess', retryThink, handlers.onContent);
+    const retryAnswer = await requestModel(
+      text,
+      bestGuessPrompt,
+      requestId,
+      'best-guess',
+      false,
+      handlers.onContent,
+      OLLAMA_RETRY_NUM_PREDICT
+    );
+    return matchAnswerToChoices(retryAnswer, text)?.answer ?? retryAnswer;
   } finally {
     console.log(
       `study-answer finished requestId=${requestId} elapsedMs=${Math.round(performance.now() - startedAt)} attempts=${attempts} chars=${text.length}`
@@ -282,7 +304,7 @@ async function generateAnswer(text, handlers = {}) {
   }
 }
 
-async function requestModel(text, systemPrompt, requestId, attempt, think, onContent) {
+async function requestModel(text, systemPrompt, requestId, attempt, think, onContent, numPredict = null) {
   const payload = {
     model: OLLAMA_MODEL,
     stream: true,
@@ -290,7 +312,8 @@ async function requestModel(text, systemPrompt, requestId, attempt, think, onCon
     keep_alive: OLLAMA_KEEP_ALIVE,
     options: {
       temperature: 0,
-      num_ctx: OLLAMA_NUM_CTX
+      num_ctx: OLLAMA_NUM_CTX,
+      ...(numPredict ? { num_predict: numPredict } : {})
     },
     messages: [
       {
@@ -305,7 +328,6 @@ async function requestModel(text, systemPrompt, requestId, attempt, think, onCon
   };
 
   const startedAt = performance.now();
-  let timeToFirstTokenMs = null;
   let accumulatedContent = '';
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
@@ -328,46 +350,26 @@ async function requestModel(text, systemPrompt, requestId, attempt, think, onCon
       throw createHttpError(502, `Ollama request failed${details ? `: ${details}` : '.'}`);
     }
 
-    let pending = '';
-    let finalEvent = null;
-    const processLine = (line) => {
-      if (!line.trim()) return;
-
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        throw createHttpError(502, 'Ollama returned an invalid streaming response.');
-      }
-
-      const thinking = event?.message?.thinking;
-      const content = event?.message?.content;
-      if (timeToFirstTokenMs === null && ((typeof thinking === 'string' && thinking.length > 0) || (typeof content === 'string' && content.length > 0))) {
-        timeToFirstTokenMs = Math.round(performance.now() - startedAt);
-      }
-
-      if (typeof content === 'string' && content.length > 0) {
-        accumulatedContent += content;
-        onContent?.(accumulatedContent, content, attempt);
-      }
-
-      if (event?.done) {
-        finalEvent = event;
-      }
-    };
-
-    const decoder = new TextDecoder();
-    for await (const chunk of response.body) {
-      pending += decoder.decode(chunk, { stream: true });
-      const lines = pending.split(/\r?\n/);
-      pending = lines.pop() ?? '';
-      for (const line of lines) processLine(line);
+    let streamResult;
+    try {
+      streamResult = await readOllamaEventStream(response.body, (accumulated, delta) => {
+        accumulatedContent = accumulated;
+        onContent?.(accumulated, delta, attempt);
+      }, startedAt);
+    } catch (error) {
+      throw createHttpError(502, error.message || 'Ollama returned an invalid streaming response.');
     }
-    pending += decoder.decode();
-    if (pending.trim()) processLine(pending);
 
     const elapsedMs = Math.round(performance.now() - startedAt);
-    logOllamaUsage(finalEvent ?? {}, elapsedMs, requestId, attempt, timeToFirstTokenMs, think);
+    accumulatedContent = streamResult.content;
+    logOllamaUsage(
+      streamResult.finalEvent ?? {},
+      elapsedMs,
+      requestId,
+      attempt,
+      streamResult.timeToFirstTokenMs,
+      think
+    );
     const content = normalizeModelAnswer(accumulatedContent);
     return content || 'Unable to determine';
   } catch (error) {
@@ -418,25 +420,6 @@ function logOllamaUsage(data, elapsedMs, requestId, attempt, timeToFirstTokenMs,
   ].join(' '));
 }
 
-function shouldEnableThinking(text) {
-  if (OLLAMA_THINKING_MODE === 'on') return true;
-  if (OLLAMA_THINKING_MODE === 'off') return false;
-
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const optionCount = lines.filter((line) => /^(?:\(?[A-Za-z]\)?[.)]|[A-Za-z]\s*[-:])\s+\S/.test(line)).length;
-  const questionCount = (text.match(/\?/g) ?? []).length;
-  const wordCount = text.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
-  const arithmeticExpressions = text.match(/\d\s*[+×÷*/−-]\s*\d/g)?.length ?? 0;
-  const complexCue = /\b(?:analy[sz]e|compare|contrast|evaluate|justify|explain|infer|deduce|predict|mechanism|multi[- ]step|why|how (?:does|would|can|did|could)|based on (?:the )?(?:data|results|evidence|experiment|passage))\b/i.test(text);
-
-  const straightforwardMultipleChoice = optionCount >= 2
-    && questionCount <= 1
-    && wordCount <= 80
-    && arithmeticExpressions <= 1
-    && !complexCue;
-  return !straightforwardMultipleChoice;
-}
-
 function finiteNumber(value) {
   return Number.isFinite(value) ? value : null;
 }
@@ -444,10 +427,6 @@ function finiteNumber(value) {
 function nanosecondsToMilliseconds(value) {
   const nanoseconds = finiteNumber(value);
   return nanoseconds === null ? null : Math.round(nanoseconds / 1_000_000);
-}
-
-function isUncertainAnswer(answer) {
-  return /\b(?:unable to determine|cannot determine|can't determine|not enough information|insufficient information|cannot be determined|unclear)\b/i.test(answer);
 }
 
 async function checkOllama() {

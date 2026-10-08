@@ -9,6 +9,13 @@ cd macos-client
 swift build
 ```
 
+Run the pure question extraction regression checks with:
+
+```bash
+cd macos-client
+swift run StudyHelperCoreRegression
+```
+
 ## Run
 
 ```bash
@@ -56,7 +63,7 @@ The selected mode is saved with `UserDefaults` and survives app restarts.
 ### Question Input
 
 - `Selected Text`: the default. It keeps the existing highlighted-text retrieval and clipboard-preserving fallback.
-- `Read Screen`: captures the frontmost app window in memory, recognizes its visible text, and sends likely question lines with their answer choices. OCR and Accessibility text use the same question extraction. It falls back to Accessibility text when recognition finds nothing. It does not save a screenshot. Screen text is capped at 16,000 characters after extraction.
+- `Read Screen`: captures the frontmost app window in memory, recognizes its visible text, and sends likely question lines with their answer choices. OCR and Accessibility text use the same question extraction. It recognizes fill-in-the-blank questions, labeled choices split across lines, and unlabeled choices (which it labels `Option 1`, `Option 2`, and so on for matching). It filters common screen controls such as `Submit` and `Ask Google`. It falls back to Accessibility text when recognition finds nothing. It does not save a screenshot. Screen text is capped at 16,000 characters after extraction.
 
 Study answers stream into the existing Mac popup as the model produces answer text. Thinking traces are not shown. The Mac client falls back to the JSON answer endpoint when connected to an older bridge that does not support streaming.
 

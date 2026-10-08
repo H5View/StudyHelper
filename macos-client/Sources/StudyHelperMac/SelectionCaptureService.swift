@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import StudyHelperCore
 import Vision
 
 private let maxScreenTextLength = 16_000
@@ -135,164 +136,12 @@ struct SelectionCaptureService {
             }
             .compactMap { $0.topCandidates(1).first?.string }
 
-        let extractedText = normalizeSelection(extractQuestionText(from: lines).joined(separator: "\n"))
+        let extractedText = normalizeSelection(QuestionTextExtractor.extract(from: lines).joined(separator: "\n"))
         let text = String(extractedText.prefix(maxScreenTextLength))
         debugLog(
             "screenRead OCR extractedCharacters=\(extractedText.count) sentCharacters=\(text.count) outputTruncated=\(extractedText.count > maxScreenTextLength)"
         )
         return text
-    }
-
-    private func extractQuestionText(from lines: [String]) -> [String] {
-        let normalizedLines = lines
-            .flatMap { $0.components(separatedBy: .newlines) }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        // Browser tabs and document toolbars often contain unrelated question-like titles.
-        // In Google Docs, the editable page follows the document's menu bar.
-        let documentMenuIndex = normalizedLines.firstIndex {
-            $0.localizedCaseInsensitiveContains("File Edit View Insert Format")
-        }
-        let browserAddressIndex = normalizedLines.firstIndex {
-            $0.localizedCaseInsensitiveContains("docs.google.com/document/")
-        }
-        let contentStart = documentMenuIndex ?? browserAddressIndex
-        let content = contentStart.map { Array(normalizedLines.dropFirst($0 + 1)) } ?? normalizedLines
-        let choiceIndices = content.indices.filter { isAnswerChoiceLine(content[$0]) }
-
-        let questionIndices = content.indices.filter { index in
-            let line = content[index].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !isAnswerChoiceLine(line) else { return false }
-            let lowercased = line.lowercased()
-            let hasQuestionMark = line.contains("?") && line.filter(\.isLetter).count >= 3
-            let hasArithmetic = line.range(
-                of: #"\d\s*[+×÷*/−-]\s*\d"#,
-                options: .regularExpression
-            ) != nil
-            let numberedPrefix = lowercased.range(of: #"^\d+[.)]\s*"#, options: .regularExpression)
-            let questionStart = numberedPrefix.map { String(lowercased[$0.upperBound...]) } ?? lowercased
-            let startsWithQuestionWord = [
-                "what ", "which ", "why ", "how ", "when ", "where ", "who ",
-                "solve ", "calculate ", "compute ", "evaluate ", "determine ",
-                "identify ", "select ", "find ", "name "
-            ].contains { word in
-                questionStart.hasPrefix(word)
-            }
-            return hasArithmetic || hasQuestionMark || startsWithQuestionWord
-        }
-
-        guard !questionIndices.isEmpty else {
-            guard choiceIndices.count >= 2 else { return content }
-
-            var selectedIndices = Set<Int>()
-            for index in choiceIndices where index == 0 || !isAnswerChoiceLine(content[index - 1]) {
-                var previousIndex = index - 1
-                var contextLines = 0
-                while previousIndex >= 0 && contextLines < 3 && !isAnswerChoiceLine(content[previousIndex]) {
-                    selectedIndices.insert(previousIndex)
-                    previousIndex -= 1
-                    contextLines += 1
-                }
-
-                _ = addAnswerChoiceGroup(
-                    startingAt: index,
-                    in: content,
-                    questionIndices: [],
-                    selectedIndices: &selectedIndices
-                )
-            }
-            return content.indices.filter { selectedIndices.contains($0) }.map { content[$0] }
-        }
-
-        var selectedIndices = Set<Int>()
-        for index in questionIndices {
-            let precedingQuestion = questionIndices.last(where: { $0 < index }) ?? -1
-            let precedingChoice = choiceIndices.last(where: { $0 < index }) ?? -1
-            var previousIndex = index - 1
-            var contextLines = 0
-            while previousIndex > max(precedingQuestion, precedingChoice) && contextLines < 2 {
-                selectedIndices.insert(previousIndex)
-                previousIndex -= 1
-                contextLines += 1
-            }
-
-            selectedIndices.insert(index)
-            var nextIndex = index + 1
-            let questionLine = content[index].trimmingCharacters(in: .whitespacesAndNewlines)
-            let questionIsComplete = questionLine.contains("?") || questionLine.hasSuffix("=")
-            var continuationCount = 0
-
-            while nextIndex < content.count && !questionIndices.contains(nextIndex) {
-                if isAnswerChoiceLine(content[nextIndex]) {
-                    _ = addAnswerChoiceGroup(
-                        startingAt: nextIndex,
-                        in: content,
-                        questionIndices: questionIndices,
-                        selectedIndices: &selectedIndices
-                    )
-                    break
-                }
-
-                guard !questionIsComplete && continuationCount < 4 else { break }
-                selectedIndices.insert(nextIndex)
-                nextIndex += 1
-                continuationCount += 1
-                let continuation = content[nextIndex - 1].trimmingCharacters(in: .whitespacesAndNewlines)
-                if continuation.contains("?") || continuation.hasSuffix("=") { break }
-            }
-        }
-
-        return content.indices.filter { selectedIndices.contains($0) }.map { content[$0] }
-    }
-
-    private func isAnswerChoiceLine(_ line: String) -> Bool {
-        line.range(
-            of: #"^\s*(?:\([A-Za-z]\)|[A-Za-z][.)]|[A-Za-z]\s*[-:])\s*\S"#,
-            options: .regularExpression
-        ) != nil
-    }
-
-    @discardableResult
-    private func addAnswerChoiceGroup(
-        startingAt startIndex: Int,
-        in content: [String],
-        questionIndices: [Int],
-        selectedIndices: inout Set<Int>
-    ) -> Int {
-        var nextIndex = startIndex
-        var choiceCount = 0
-
-        while nextIndex < content.count && isAnswerChoiceLine(content[nextIndex]) && choiceCount < 26 {
-            selectedIndices.insert(nextIndex)
-            nextIndex += 1
-            choiceCount += 1
-
-            var continuationCount = 0
-            while nextIndex < content.count
-                && !isAnswerChoiceLine(content[nextIndex])
-                && !questionIndices.contains(nextIndex)
-                && continuationCount < 3 {
-                let continuation = content[nextIndex].trimmingCharacters(in: .whitespacesAndNewlines)
-                let previousChoiceText = content[nextIndex - 1].trimmingCharacters(in: .whitespacesAndNewlines)
-                guard isLikelyChoiceContinuation(continuation, following: previousChoiceText) else { break }
-                selectedIndices.insert(nextIndex)
-                nextIndex += 1
-                continuationCount += 1
-            }
-        }
-
-        return choiceCount
-    }
-
-    private func isLikelyChoiceContinuation(_ line: String, following previousLine: String) -> Bool {
-        guard let firstCharacter = line.first else { return false }
-        let beginsLikeContinuation = firstCharacter.isLowercase || ",;:)–-".contains(firstCharacter)
-        let previousEndsMidThought = previousLine.range(
-            of: #"\b(?:and|or|of|to|in|on|for|with|by|from|that|which|a|an|the|because|as|is|are|was|were|into|through|between|than|more|less|,|[-–])$"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) != nil
-        return beginsLikeContinuation || previousEndsMidThought
     }
 
     private func copySelectedTextUsingAccessibility() -> String? {
@@ -342,7 +191,7 @@ struct SelectionCaptureService {
 
         let rawText = strings.joined(separator: "\n")
         let extractedText = normalizeSelection(
-            extractQuestionText(from: rawText.components(separatedBy: .newlines)).joined(separator: "\n")
+            QuestionTextExtractor.extract(from: rawText.components(separatedBy: .newlines)).joined(separator: "\n")
         )
         return ScreenReadResult(
             text: String(extractedText.prefix(maxScreenTextLength)),

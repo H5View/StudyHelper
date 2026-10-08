@@ -10,9 +10,19 @@ let package = Package(
         .executable(name: "StudyHelperMac", targets: ["StudyHelperMac"])
     ],
     targets: [
+        .target(
+            name: "StudyHelperCore",
+            path: "Sources/StudyHelperCore"
+        ),
         .executableTarget(
             name: "StudyHelperMac",
+            dependencies: ["StudyHelperCore"],
             path: "Sources/StudyHelperMac"
+        ),
+        .executableTarget(
+            name: "StudyHelperCoreRegression",
+            dependencies: ["StudyHelperCore"],
+            path: "Tests/StudyHelperCoreRegression"
         )
     ]
 )
