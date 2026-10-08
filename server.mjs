@@ -16,6 +16,7 @@ const OLLAMA_NUM_CTX = parsePositiveInt(env.OLLAMA_NUM_CTX, 8192);
 const MAX_INPUT_LENGTH = parsePositiveInt(env.STUDY_ASSISTANT_MAX_INPUT_LENGTH, 16000);
 const OLLAMA_KEEP_ALIVE = env.OLLAMA_KEEP_ALIVE || '5m';
 const OLLAMA_THINKING_MODE = normalizeThinkingMode(env.OLLAMA_THINKING_MODE);
+const OLLAMA_NUM_PREDICT = parsePositiveInt(env.OLLAMA_NUM_PREDICT, 256);
 const OLLAMA_RETRY_NUM_PREDICT = parsePositiveInt(env.OLLAMA_RETRY_NUM_PREDICT, 128);
 const DEBUG_INPUT = env.STUDY_ASSISTANT_DEBUG_INPUT === '1';
 const VALID_OUTPUT_MODES = new Set(['mac', 'windows', 'both']);
@@ -106,20 +107,6 @@ let latestAnswerState = {
   status: 'idle'
 };
 let nextStudyRequestId = 0;
-
-const SYSTEM_PROMPT = [
-  'Answer the study question using only the text and choices provided.',
-  'Do not browse or recommend outside research.',
-  'Ignore interface text if any remains in the input.',
-  'Detect whether there is one question or multiple questions.',
-  'For labeled choices, return only the exact choice label and its choice text, such as D — stomata.',
-  'For choices labeled Option 1, Option 2, and so on, return the selected Option label and exact choice text.',
-  'For choices with no labels, return the exact selected choice text and do not invent a letter.',
-  "For multiple questions, answer each in order on separate lines, using the question number and selected choice label/text when available.",
-  'Never combine multiple questions into one answer.',
-  'When choices are present, always select the most plausible choice. If wording is incomplete, choose from the visible options.',
-  'Return only the answer. Do not include reasoning, uncertainty disclaimers, or follow-up advice.'
-].join(' ');
 
 const server = createServer(async (req, res) => {
   try {
@@ -246,6 +233,7 @@ server.listen(PORT, HOST, () => {
   console.log(`Ollama context window: ${OLLAMA_NUM_CTX} tokens`);
   console.log(`Ollama keep_alive: ${OLLAMA_KEEP_ALIVE}`);
   console.log(`Ollama thinking mode: ${OLLAMA_THINKING_MODE}`);
+  console.log(`Ollama output token limit: ${OLLAMA_NUM_PREDICT}`);
   console.log(`Uncertain-answer retry token limit: ${OLLAMA_RETRY_NUM_PREDICT}`);
   console.log(`Input debug logging: ${DEBUG_INPUT ? 'enabled (redacted)' : 'disabled'}`);
   console.log(`Maximum input: ${MAX_INPUT_LENGTH} characters`);
@@ -260,16 +248,29 @@ async function generateAnswer(text, handlers = {}) {
   let attempts = 0;
   const thinkingDecision = getThinkingDecision(text, OLLAMA_THINKING_MODE);
   const think = thinkingDecision.think;
+  const questionType = thinkingDecision.questionType;
 
   console.log(
-    `study-answer started requestId=${requestId} chars=${text.length} lines=${text.split(/\r?\n/).length} num_ctx=${OLLAMA_NUM_CTX} think=${think} thinkReason=${thinkingDecision.reason} detectedChoices=${thinkingDecision.choiceCount} keep_alive=${OLLAMA_KEEP_ALIVE}`
+    `study-answer started requestId=${requestId} questionType=${questionType} chars=${text.length} lines=${text.split(/\r?\n/).length} num_ctx=${OLLAMA_NUM_CTX} num_predict=${OLLAMA_NUM_PREDICT} think=${think} thinkReason=${thinkingDecision.reason} detectedChoices=${thinkingDecision.choiceCount} keep_alive=${OLLAMA_KEEP_ALIVE}`
   );
   if (DEBUG_INPUT) {
     console.log(`study input debug requestId=${requestId} text=${JSON.stringify(redactInputForDebug(text))}`);
   }
   try {
     attempts += 1;
-    const firstAnswer = await requestModel(text, SYSTEM_PROMPT, requestId, 'initial', think, handlers.onContent);
+    const firstAnswer = await requestModel(
+      text,
+      buildSystemPrompt(questionType, text),
+      requestId,
+      'initial',
+      think,
+      handlers.onContent,
+      OLLAMA_NUM_PREDICT
+    );
+    if (questionType !== 'multiple-choice') {
+      return firstAnswer;
+    }
+
     const firstResolution = resolveAnswer(firstAnswer, text);
     if (firstResolution.matchedChoice) {
       console.log(`study-answer choice matched requestId=${requestId} label=${firstResolution.choice.label}`);
@@ -294,7 +295,7 @@ async function generateAnswer(text, handlers = {}) {
       'best-guess',
       false,
       handlers.onContent,
-      OLLAMA_RETRY_NUM_PREDICT
+      Math.min(OLLAMA_RETRY_NUM_PREDICT, OLLAMA_NUM_PREDICT)
     );
     return matchAnswerToChoices(retryAnswer, text)?.answer ?? retryAnswer;
   } finally {
@@ -302,6 +303,40 @@ async function generateAnswer(text, handlers = {}) {
       `study-answer finished requestId=${requestId} elapsedMs=${Math.round(performance.now() - startedAt)} attempts=${attempts} chars=${text.length}`
     );
   }
+}
+
+function buildSystemPrompt(questionType, text) {
+  const shared = [
+    'Use only the supplied question text; do not browse or recommend outside research.',
+    'Ignore interface text if any remains in the input.',
+    'If multiple questions are present, answer each in order on separate lines.'
+  ];
+  if (questionType === 'multiple-choice') {
+    return [
+      ...shared,
+      'For each multiple-choice question, select the best-supported option. If uncertain, choose the closest supported answer rather than refusing.',
+      'Return the answer letter and exact choice text, followed by one short explanatory sentence. For unlabeled choices, use the provided Option N label.',
+      'Do not include long reasoning, uncertainty disclaimers, or follow-up advice.'
+    ].join(' ');
+  }
+
+  if (questionType === 'fill-in-the-blank') {
+    const explanationRequested = /\b(?:explain|why|how|show (?:your )?work|give (?:an )?explanation)\b/i.test(text);
+    return [
+      ...shared,
+      'This is a fill-in-the-blank question. Supply the missing word or shortest correct phrase directly.',
+      'Do not choose an answer letter or invent answer choices.',
+      explanationRequested
+        ? 'The question requests an explanation, so give the missing word or phrase first, followed by a concise explanation.'
+        : 'Return only the missing word or phrase. Do not add an explanation, preamble, uncertainty disclaimer, or follow-up advice.'
+    ].join(' ');
+  }
+
+  return [
+    ...shared,
+    'This is a short-answer question. Give a concise, direct answer without requiring or inventing answer choices.',
+    'Use one short sentence unless the question explicitly requests an explanation or more detail.'
+  ].join(' ');
 }
 
 async function requestModel(text, systemPrompt, requestId, attempt, think, onContent, numPredict = null) {
@@ -313,7 +348,7 @@ async function requestModel(text, systemPrompt, requestId, attempt, think, onCon
     options: {
       temperature: 0,
       num_ctx: OLLAMA_NUM_CTX,
-      ...(numPredict ? { num_predict: numPredict } : {})
+      num_predict: numPredict ?? OLLAMA_NUM_PREDICT
     },
     messages: [
       {
@@ -332,7 +367,7 @@ async function requestModel(text, systemPrompt, requestId, attempt, think, onCon
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
   console.log(
-    `ollama request started requestId=${requestId} attempt=${attempt} model=${OLLAMA_MODEL} num_ctx=${OLLAMA_NUM_CTX} think=${think} keep_alive=${OLLAMA_KEEP_ALIVE} inputChars=${text.length}`
+    `ollama request started requestId=${requestId} attempt=${attempt} model=${OLLAMA_MODEL} num_ctx=${OLLAMA_NUM_CTX} num_predict=${numPredict ?? OLLAMA_NUM_PREDICT} think=${think} keep_alive=${OLLAMA_KEEP_ALIVE} inputChars=${text.length}`
   );
 
   try {

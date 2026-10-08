@@ -2,6 +2,8 @@ const CHOICE_HEADING = /^(?:options?|answer choices|choices)\s*:?$/i;
 const LABELLED_CHOICE = /^\s*(?:\(([A-Z])\)|([A-Z])\s*[.)]|([A-Z])\s*[-:])\s*(.*)$/i;
 const NUMBERED_CHOICE = /^\s*option\s+(\d+)\s*[:.)-]\s*(.*)$/i;
 const COMPLEX_CUE = /\b(?:analy[sz]e|compare|contrast|evaluate|justify|explain|infer|deduce|predict|mechanism|multi[- ]step|why|how\s+(?:does|would|can|did|could)|based on (?:the )?(?:data|results|evidence|experiment|passage))\b/i;
+const FILL_IN_CUE = /(?:_+|\.{3,}|…{1,}|\[\s*blank\s*\]|\(\s*blank\s*\)|\bfill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\b|\bcomplete\s+(?:the\s+)?(?:blank|sentence|statement)\b|\b(?:missing|insert|supply)\s+(?:the\s+)?(?:words?|terms?|phrases?)\b|\bmissing\s+terms?\b)/i;
+const INCOMPLETE_FILL_ENDING = /\b(?:is|are|was|were|stands\s+for|called|known\s+as|equals|means|becomes?|converts?\s+into|results?\s+in|consists?\s+of)\s+(?:the|a|an)?\s*$/i;
 const UNCERTAIN_START = /^\s*(?:unable to determine|cannot determine|can't determine|not enough information|insufficient information|cannot be determined|i (?:do not|don't) know|i am not sure|i'm not sure|ask google|search (?:google|online)|look it up)\b/i;
 
 export function parseChoiceGroups(text) {
@@ -52,27 +54,42 @@ export function parseChoiceGroups(text) {
   return groups.filter((group) => group.length >= 2);
 }
 
+export function detectQuestionType(text) {
+  const input = String(text ?? '').trim();
+  if (parseChoiceGroups(input).some((group) => group.length >= 2)) return 'multiple-choice';
+  if (FILL_IN_CUE.test(input) || INCOMPLETE_FILL_ENDING.test(input.replace(/[.!?\s]+$/g, ''))) {
+    return 'fill-in-the-blank';
+  }
+  return 'short-answer';
+}
+
 export function getThinkingDecision(text, mode = 'auto') {
   const normalizedMode = ['auto', 'on', 'off'].includes(String(mode).toLowerCase())
     ? String(mode).toLowerCase()
     : 'auto';
-  if (normalizedMode === 'on') return { think: true, reason: 'forced-on', choiceCount: 0 };
-  if (normalizedMode === 'off') return { think: false, reason: 'forced-off', choiceCount: 0 };
 
   const input = String(text ?? '');
+  const questionType = detectQuestionType(input);
   const groups = parseChoiceGroups(input);
   const choiceCount = Math.max(0, ...groups.map((group) => group.length));
+  if (normalizedMode === 'on') return { think: true, reason: 'forced-on', questionType, choiceCount };
+  if (normalizedMode === 'off') return { think: false, reason: 'forced-off', questionType, choiceCount };
+
   const wordCount = input.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
   const questionCount = (input.match(/\?/g) ?? []).length;
   const arithmeticCount = input.match(/\d\s*[+×÷*/−-]\s*\d/g)?.length ?? 0;
   const hasMultipleNumberedQuestions = input.split(/\r?\n/)
     .filter((line) => /^\s*\d+[.)]\s+\S/.test(line) && !parseChoiceLine(line)).length > 1;
 
-  if (choiceCount < 2) return { think: true, reason: 'choices-not-detected', choiceCount };
-  if (wordCount > 100) return { think: true, reason: 'long-input', choiceCount };
-  if (questionCount > 1 || hasMultipleNumberedQuestions) return { think: true, reason: 'multiple-questions', choiceCount };
-  if (arithmeticCount > 1 || COMPLEX_CUE.test(input)) return { think: true, reason: 'reasoning-cue', choiceCount };
-  return { think: false, reason: 'straightforward-multiple-choice', choiceCount };
+  if (wordCount > 100) return { think: true, reason: 'long-input', questionType, choiceCount };
+  if (questionCount > 1 || hasMultipleNumberedQuestions) return { think: true, reason: 'multiple-questions', questionType, choiceCount };
+  if (arithmeticCount > 1 || COMPLEX_CUE.test(input)) return { think: true, reason: 'reasoning-cue', questionType, choiceCount };
+  return {
+    think: false,
+    reason: questionType === 'multiple-choice' ? 'straightforward-multiple-choice' : `straightforward-${questionType}`,
+    questionType,
+    choiceCount
+  };
 }
 
 export function matchAnswerToChoices(answer, text) {
@@ -86,10 +103,10 @@ export function matchAnswerToChoices(answer, text) {
     return {
       label: 'multiple',
       text: '',
-      answer: matches.map((match, index) => `${index + 1}. ${match.label} — ${match.text}`).join('\n')
+      answer: matches.map((match, index) => `${index + 1}. ${match.answer}`).join('\n')
     };
   }
-  return matchChoiceLine(answerLines[0] ?? '', groups[0]);
+  return matchChoiceLine(answerLines.join(' '), groups[0]);
 }
 
 function matchChoiceLine(answerLine, choices) {
@@ -105,7 +122,7 @@ function matchChoiceLine(answerLine, choices) {
       ?? letterMatch?.[1]?.toUpperCase() ?? letterMatch?.[2]?.toUpperCase();
   if (label) {
     const selected = choices.find((choice) => choice.label.toLowerCase() === label.toLowerCase());
-    if (selected) return { label: selected.label, text: selected.text, answer: `${selected.label} — ${selected.text}` };
+    if (selected) return matchedChoice(selected, firstLine);
   }
 
   const answerText = stripAnswerLead(firstLine);
@@ -116,9 +133,29 @@ function matchChoiceLine(answerLine, choices) {
     if (normalizedChoice.length < 3) return false;
     return normalizedAnswer === normalizedChoice || normalizedAnswer.startsWith(`${normalizedChoice} `);
   });
-  return selected
-    ? { label: selected.label, text: selected.text, answer: `${selected.label} — ${selected.text}` }
-    : null;
+  return selected ? matchedChoice(selected, firstLine) : null;
+}
+
+function matchedChoice(choice, answerLine) {
+  const explanation = extractBriefExplanation(answerLine, choice.text);
+  return {
+    label: choice.label,
+    text: choice.text,
+    answer: `${choice.label} — ${choice.text}${explanation ? `. ${explanation}.` : ''}`
+  };
+}
+
+function extractBriefExplanation(answerLine, choiceText) {
+  const answer = String(answerLine ?? '').trim();
+  const choiceStart = answer.toLocaleLowerCase().indexOf(choiceText.toLocaleLowerCase());
+  if (choiceStart < 0) return '';
+  const suffix = answer.slice(choiceStart + choiceText.length)
+    .replace(/^[\s.,:;—–-]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!suffix || /\b(?:ask google|search (?:google|online)|wording is unclear|not sure|if uncertain|i think)\b/i.test(suffix)) return '';
+  const firstSentence = suffix.match(/^(.{1,180}?[.!?])(?:\s|$)/)?.[1] ?? suffix.slice(0, 140);
+  return firstSentence.trim().replace(/[.!?]+$/, '');
 }
 
 export function resolveAnswer(answer, text) {

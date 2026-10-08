@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  detectQuestionType,
   getThinkingDecision,
   isUncertainAnswer,
   matchAnswerToChoices,
@@ -22,8 +23,30 @@ test('stomata multiple-choice is classified as a fast, no-thinking request', () 
   assert.deepEqual(getThinkingDecision(stomataQuestion, 'auto'), {
     think: false,
     reason: 'straightforward-multiple-choice',
+    questionType: 'multiple-choice',
     choiceCount: 4
   });
+});
+
+test('fill-in-the-blank and short-answer types do not enable thinking just because there are no choices', () => {
+  const fillIns = [
+    'The powerhouse of the cell is the _____.',
+    'DNA stands for ____.',
+    'The process by which plants convert sunlight into chemical energy is ____.'
+  ];
+  for (const question of fillIns) {
+    assert.equal(detectQuestionType(question), 'fill-in-the-blank');
+    assert.deepEqual(getThinkingDecision(question), {
+      think: false,
+      reason: 'straightforward-fill-in-the-blank',
+      questionType: 'fill-in-the-blank',
+      choiceCount: 0
+    });
+  }
+  assert.equal(detectQuestionType('Fill in the blank: DNA stands for'), 'fill-in-the-blank');
+  assert.equal(detectQuestionType('DNA stands for _'), 'fill-in-the-blank');
+  assert.equal(detectQuestionType('What is osmosis?'), 'short-answer');
+  assert.equal(getThinkingDecision('What is osmosis?').think, false);
 });
 
 test('parenthesized and no-space labels are detected as choices', () => {
@@ -45,10 +68,15 @@ test('complex questions and explicit thinking overrides retain their behavior', 
   assert.equal(getThinkingDecision(complex).think, true);
   assert.equal(getThinkingDecision(stomataQuestion, 'on').think, true);
   assert.equal(getThinkingDecision(complex, 'off').think, false);
+  assert.equal(getThinkingDecision('Explain why photosynthesis needs light.').think, true);
 });
 
 test('answers map back to the selected labeled or synthetic unlabeled choice', () => {
   assert.equal(matchAnswerToChoices('D — stomata. Ask Google if uncertain.', stomataQuestion)?.answer, 'D — stomata');
+  assert.equal(
+    matchAnswerToChoices('D — stomata. Stomata allow carbon dioxide to enter the leaf.', stomataQuestion)?.answer,
+    'D — stomata. Stomata allow carbon dioxide to enter the leaf.'
+  );
 
   const unlabeled = [
     'Plant leaves contain small openings called ________, through which carbon dioxide enters the plant.',

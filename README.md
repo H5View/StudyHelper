@@ -53,6 +53,7 @@ OLLAMA_MODEL=gemma4:12b-it-q4_K_M
 OLLAMA_NUM_CTX=8192
 OLLAMA_THINKING_MODE=auto
 OLLAMA_KEEP_ALIVE=5m
+OLLAMA_NUM_PREDICT=256
 OLLAMA_RETRY_NUM_PREDICT=128
 OLLAMA_TIMEOUT_MS=600000
 STUDY_ASSISTANT_MAX_INPUT_LENGTH=16000
@@ -63,13 +64,15 @@ STUDY_ASSISTANT_DEBUG_INPUT=0
 
 `OLLAMA_MODEL` selects the model for the bridge and defaults to `gemma4:12b-it-q4_K_M`. Change this environment value to move to another Ollama model; the Mac client displays the model reported by `/health` and does not choose a model itself.
 
-`OLLAMA_THINKING_MODE` accepts `auto`, `on`, or `off`. In `auto` mode, straightforward single multiple-choice questions run with `think: false`; open-ended, long, multi-question, or reasoning-heavy prompts use `think: true`. The bridge sends Ollama's top-level `think` field and never displays or logs the model's private thinking output. Set `on` or `off` to override the heuristic.
+`OLLAMA_THINKING_MODE` accepts `auto`, `on`, or `off`. In `auto` mode, the bridge classifies each request as multiple-choice, fill-in-the-blank, or short-answer before it builds the prompt. Straightforward questions of all three types run with `think: false`; longer, multi-question, or reasoning-heavy prompts can use `think: true`. The bridge sends Ollama's top-level `think` field and never displays or logs the model's private thinking output. Set `on` or `off` to override the heuristic.
+
+`OLLAMA_NUM_PREDICT` sets the maximum generated output tokens for each answer and defaults to `256`. This bounds simple answers and thinking output; set a larger value if your longer responses are cut short. Automatic best-guess retries are limited to multiple-choice requests and use the lower of `OLLAMA_RETRY_NUM_PREDICT` and `OLLAMA_NUM_PREDICT`.
 
 `OLLAMA_KEEP_ALIVE` is sent as Ollama's `keep_alive` field and defaults to `5m`. Set it to `0` to unload the model after a request or choose a longer duration when you want fewer reloads. Avoid `-1` on a GPU with limited free memory unless you intend to keep the model resident indefinitely.
 
-The bridge prints the selected thinking decision and how many answer choices it detected on each request. `thinkReason=forced-on` means the Windows `.env` sets `OLLAMA_THINKING_MODE=on`; `thinkReason=choices-not-detected` means the received text did not contain a recognized choice group. Set `STUDY_ASSISTANT_DEBUG_INPUT=1` temporarily to print the received text to the bridge console with names in `Name:` fields, emails, URLs, phone numbers, and long numeric IDs redacted. It is off by default; turn it back off after debugging. The bridge never writes this trace to a file itself.
+The bridge logs the detected question type, thinking decision, and number of detected choices for each request. `thinkReason=forced-on` means the Windows `.env` sets `OLLAMA_THINKING_MODE=on`; `thinkReason=straightforward-fill-in-the-blank` means an ordinary fill-in question is using the fast path. Set `STUDY_ASSISTANT_DEBUG_INPUT=1` temporarily to print the received text to the bridge console with names in `Name:` fields, emails, URLs, phone numbers, and long numeric IDs redacted. It is off by default; turn it back off after debugging. The bridge never writes this trace to a file itself.
 
-An uncertainty retry runs only when no supplied choice can be matched and the response begins with an uncertainty or search refusal. Retries disable thinking and use `OLLAMA_RETRY_NUM_PREDICT` (128 tokens by default) to avoid another long generation.
+Multiple-choice prompts ask for the selected letter, choice text, and one short explanation; when uncertain, the model is instructed to choose the closest supported option. Fill-in-the-blank prompts ask for only the missing word or short phrase, with no answer letter. Short-answer prompts ask for a concise direct response. Automatic uncertainty retries run only for multiple-choice requests when no supplied choice can be matched and the response begins with an uncertainty or search refusal; fill-in-the-blank and short-answer requests never enter that retry path.
 
 Ollama responses stream to the Mac popup and update the Windows viewer as answer text arrives. The existing `/study-answer` endpoint continues to return its JSON response for other clients. Bridge logs report time to first model token, prompt evaluation time, generation time, model load time, Ollama total time, and end-to-end time. Thinking text and screen content are excluded from logs and client output.
 

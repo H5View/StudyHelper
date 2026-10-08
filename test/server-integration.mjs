@@ -24,7 +24,13 @@ const ollama = createServer(async (request, response) => {
   const retryNumber = calls.filter((call) => call.messages.at(-1).content.includes('RETRY_CASE')).length;
   const answer = uncertainRetryCase && retryNumber === 2 ? 'D) stomata' :
     uncertainRetryCase ? 'Ask Google' :
-      question.includes('Option 4: stomata') ? 'stomata' : 'D — stomata. The wording is unclear.';
+      question.includes('NO_RETRY_FILL') ? 'Unable to determine' :
+      question.includes('Option 4: stomata') ? 'stomata' :
+        question.includes('powerhouse of the cell') ? 'mitochondrion' :
+          question.includes('DNA stands for') ? 'deoxyribonucleic acid' :
+            question.includes('convert sunlight into chemical energy') ? 'photosynthesis' :
+              question.includes('What is osmosis?') ? 'Osmosis is the movement of water across a selectively permeable membrane.' :
+                'D — stomata. Stomata allow carbon dioxide to enter the leaf.';
 
   response.writeHead(200, { 'content-type': 'application/x-ndjson' });
   response.write(`${JSON.stringify({ message: { thinking: 'PRIVATE_TRACE: ask Google, unclear' }, done: false })}\n`);
@@ -63,6 +69,7 @@ const bridge = spawn(process.execPath, ['server.mjs'], {
     OLLAMA_NUM_CTX: '8192',
     OLLAMA_THINKING_MODE: 'auto',
     OLLAMA_KEEP_ALIVE: '5m',
+    OLLAMA_NUM_PREDICT: '96',
     OLLAMA_RETRY_NUM_PREDICT: '128',
     STUDY_ASSISTANT_DEBUG_INPUT: '1'
   },
@@ -83,14 +90,16 @@ try {
     '(A)trichomes', '(B)internodes', '(C)stipules', '(D)stomata'
   ].join('\n');
   const labeled = await postStream(bridgePort, labeledQuestion);
-  assert.equal(labeled.answer, 'D — stomata');
+  assert.equal(labeled.answer, 'D — stomata. Stomata allow carbon dioxide to enter the leaf.');
   assert.equal(calls.length, 1, 'a valid answer with a misleading thinking trace triggered a retry');
   assert.equal(calls[0].think, false, 'simple parenthesized/no-space choices enabled thinking');
   assert.equal(calls[0].options.num_ctx, 8192);
   assert.equal(calls[0].model, 'gemma4:12b-it-q4_K_M');
   assert.equal(calls[0].keep_alive, '5m');
-  assert.match(calls[0].messages[0].content, /Do not browse or recommend outside research/);
+  assert.match(calls[0].messages[0].content, /do not browse or recommend outside research/i);
   assert.doesNotMatch(calls[0].messages[0].content, /google/i);
+  assert.equal(calls[0].options.num_predict, 96, 'configured output token limit was not applied');
+  assert.match(labeled.answer, /^D — stomata\. Stomata allow carbon dioxide/);
   assert.doesNotMatch(JSON.stringify(labeled.events), /PRIVATE_TRACE|Ask Google/);
 
   const unlabeledQuestion = [
@@ -102,15 +111,48 @@ try {
   assert.equal(calls.length, 2, 'a valid unlabeled-choice answer triggered a retry');
   assert.equal(calls[1].think, false);
 
+  const fillIns = [
+    ['The powerhouse of the cell is the _____.', 'mitochondrion'],
+    ['DNA stands for ____.', 'deoxyribonucleic acid'],
+    ['The process by which plants convert sunlight into chemical energy is ____.', 'photosynthesis']
+  ];
+  for (const [question, expectedAnswer] of fillIns) {
+    const before = calls.length;
+    const response = await postStream(bridgePort, question);
+    assert.equal(response.answer, expectedAnswer);
+    assert.equal(calls.length, before + 1, 'fill-in-the-blank question triggered an automatic retry');
+    const payload = calls.at(-1);
+    assert.equal(payload.think, false, 'straightforward fill-in-the-blank enabled thinking');
+    assert.equal(payload.options.num_predict, 96);
+    assert.equal(payload.options.num_ctx, 8192);
+    assert.match(payload.messages[0].content, /This is a fill-in-the-blank question/);
+    assert.match(payload.messages[0].content, /Do not choose an answer letter/);
+    assert.match(payload.messages[0].content, /Return only the missing word or phrase/);
+  }
+
+  const noRetryQuestion = 'NO_RETRY_FILL\nFill in the blank: A plant cell wall is primarily made of ____.';
+  const callsBeforeNoRetry = calls.length;
+  const noRetry = await postStream(bridgePort, noRetryQuestion);
+  assert.equal(noRetry.answer, 'Unable to determine');
+  assert.equal(calls.length, callsBeforeNoRetry + 1, 'uncertainty in a fill-in-the-blank triggered a multiple-choice retry');
+  assert.equal(calls.at(-1).think, false);
+
+  const shortAnswer = await postStream(bridgePort, 'What is osmosis?');
+  assert.equal(shortAnswer.answer, 'Osmosis is the movement of water across a selectively permeable membrane.');
+  assert.equal(calls.at(-1).think, false);
+  assert.match(calls.at(-1).messages[0].content, /This is a short-answer question/);
+  assert.doesNotMatch(calls.at(-1).messages[0].content, /choose an answer letter/i);
+
   const retryQuestion = `RETRY_CASE\nExplain why plants need stomata.\nA) trichomes\nB) internodes\nC) stipules\nD) stomata`;
   const retried = await postStream(bridgePort, retryQuestion);
   assert.equal(retried.answer, 'D — stomata');
-  assert.equal(calls.length, 4, 'uncertain answer should receive exactly one retry');
-  assert.equal(calls[2].think, true, 'complex initial request should permit thinking');
-  assert.equal(calls[3].think, false, 'short retry should disable thinking');
-  assert.equal(calls[3].options.num_predict, 128, 'retry token limit was not applied');
+  assert.equal(calls.length, 9, 'uncertain multiple-choice answer should receive exactly one retry');
+  assert.equal(calls[7].think, true, 'complex initial request should permit thinking');
+  assert.equal(calls[8].think, false, 'short retry should disable thinking');
+  assert.equal(calls[8].options.num_predict, 96, 'retry must respect the configured output token limit');
 
-  assert.match(logs, /think=false thinkReason=straightforward-multiple-choice detectedChoices=4/);
+  assert.match(logs, /questionType=multiple-choice .*think=false thinkReason=straightforward-multiple-choice detectedChoices=4/);
+  assert.match(logs, /questionType=fill-in-the-blank .*think=false thinkReason=straightforward-fill-in-the-blank detectedChoices=0/);
   assert.match(logs, /Name: \[redacted\]/);
   assert.match(logs, /\[email\]/);
   assert.equal(logs.includes('sample.student@example.test'), false, 'opt-in trace did not redact email');

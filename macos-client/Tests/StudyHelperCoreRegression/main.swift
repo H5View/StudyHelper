@@ -21,6 +21,12 @@ let stomataExpected = [
 ]
 precondition(QuestionTextExtractor.extract(from: stomataInput) == stomataExpected, "stomata extraction lost the question or a choice")
 
+let fillInPrompt = "Fill in the blank: DNA stands for"
+precondition(
+    QuestionTextExtractor.extract(from: ["File Edit View Insert Format", fillInPrompt, "Submit", "Ask Google"]) == [fillInPrompt],
+    "fill-in-the-blank extraction included screen controls or dropped the prompt"
+)
+
 let splitLabelInput = [
     "Which structure allows gas exchange?",
     "(A)", "stomata",
@@ -69,4 +75,4 @@ let headingExpected = [
 ]
 precondition(QuestionTextExtractor.extract(from: headingInput) == headingExpected, "unlabeled options after a heading were not labeled")
 
-print("Mac extraction regressions passed: stomata question, all labeled choices, split labels, unlabeled choices, and screen-control removal.")
+print("Mac extraction regressions passed: fill-in prompt, stomata question, all labeled choices, split labels, unlabeled choices, and screen-control removal.")

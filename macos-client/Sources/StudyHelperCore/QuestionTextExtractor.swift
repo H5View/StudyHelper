@@ -157,7 +157,10 @@ public enum QuestionTextExtractor {
     private static func isQuestionLine(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isAnswerChoiceLine(trimmed) else { return false }
-        if trimmed.contains("?") || trimmed.range(of: #"\d\s*[+×÷*/−-]\s*\d|_{2,}|\.{3,}"#, options: .regularExpression) != nil {
+        if trimmed.contains("?") || trimmed.range(
+            of: #"\d\s*[+×÷*/−-]\s*\d|_+|\.{3,}|\bfill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\b|\bcomplete\s+(?:the\s+)?(?:blank|sentence|statement)\b|\b(?:missing|insert|supply)\s+(?:the\s+)?(?:words?|terms?|phrases?)\b|\b(?:stands\s+for|is\s+the|are\s+the|is\s+called|is\s+known\s+as)\s*[.!]?\s*$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
             return true
         }
         let lowercased = trimmed.lowercased()
