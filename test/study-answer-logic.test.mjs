@@ -152,6 +152,37 @@ test('chloroplast fill-in strips an Option label and rejects a prefix-only respo
   assert.equal(extractFillInAnswer(incompletePrefix, questionWithoutOcrBlank), 'Unable to determine');
 });
 
+test('inline HTML input marker classifies a no-underscore sentence and extracts only the missing word', () => {
+  const question = 'Plants absorb water from the ground through their [BLANK] This water then moves in vascular tissue up the stem to a leaf by way of leaf veins.';
+  const observedPrefix = 'Option 2: Plants absorb water from the ground through their';
+  const completedSentence = 'Option 2: Plants absorb water from the ground through their roots. This water then moves in vascular tissue up the stem to a leaf by way of leaf veins.';
+
+  assert.equal(detectQuestionType(question), 'fill-in-the-blank');
+  assert.deepEqual(getThinkingDecision(question), {
+    think: false,
+    reason: 'straightforward-fill-in-the-blank',
+    questionType: 'fill-in-the-blank',
+    choiceCount: 0
+  });
+  assert.deepEqual(formatFillInAnswer(completedSentence, question), {
+    answer: 'roots',
+    reliable: true,
+    extracted: true
+  });
+  assert.equal(formatFillInAnswer(observedPrefix, question).reliable, false);
+  assert.equal(extractFillInAnswer(observedPrefix, question), 'Unable to determine');
+
+  const chloroplast = 'The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n) [BLANK].';
+  assert.equal(detectQuestionType(chloroplast), 'fill-in-the-blank');
+  assert.equal(
+    extractFillInAnswer(
+      'Option 2: The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n) chloroplast.',
+      chloroplast
+    ),
+    'chloroplast'
+  );
+});
+
 test('parenthesized and no-space labels are detected as choices', () => {
   const text = 'Which structure carries oxygen?\n(A) alveoli\n(B) stomata\n(C) xylem\n(D) villi';
   assert.equal(parseChoiceGroups(text)[0].length, 4);

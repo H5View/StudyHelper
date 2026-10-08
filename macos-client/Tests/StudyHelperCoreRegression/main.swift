@@ -39,6 +39,30 @@ precondition(
     "chloroplast question capture failed when OCR omitted the trailing blank marker"
 )
 
+let inlineRootsPrefix = "Plants absorb water from the ground through their"
+let inlineRootsSuffix = "This water then moves in vascular tissue up the stem to a leaf by way of leaf veins."
+let inlineRootsAccessibilityText = [inlineRootsPrefix, "[BLANK]", inlineRootsSuffix, "Submit", "Ask Google"].joined(separator: "\n")
+let inlineRootsQuestion = "\(inlineRootsPrefix) [BLANK] \(inlineRootsSuffix)"
+precondition(
+    QuestionTextExtractor.extract(from: inlineRootsAccessibilityText.components(separatedBy: .newlines)) == [inlineRootsQuestion],
+    "inline McGraw Hill input did not preserve the question prefix, blank marker, and suffix"
+)
+precondition(
+    QuestionTextExtractor.recoverInlineBlankQuestion(
+        selectedText: inlineRootsPrefix,
+        accessibilityText: inlineRootsAccessibilityText
+    ) == inlineRootsQuestion,
+    "selection interrupted by the inline input did not recover the full Accessibility question"
+)
+
+let inlineChloroplastPrefix = "The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n)"
+let inlineChloroplastQuestion = "\(inlineChloroplastPrefix) [BLANK]."
+let inlineChloroplastExtracted = QuestionTextExtractor.extract(from: [inlineChloroplastPrefix, "[BLANK]", ".", "Submit"])
+precondition(
+    inlineChloroplastExtracted == [inlineChloroplastQuestion],
+    "inline chloroplast input was not retained as a trailing blank in the sentence: \(inlineChloroplastExtracted)"
+)
+
 let chloroplastChoices = [
     "File Edit View Insert Format",
     chloroplastQuestion,
@@ -64,6 +88,12 @@ let splitLabelInput = [
 precondition(
     QuestionTextExtractor.extract(from: splitLabelInput) == ["Which structure allows gas exchange?", "(A)", "stomata", "(B)", "trichomes"],
     "split parenthesized choice labels were not preserved"
+)
+
+let unrelatedInputBeforeChoice = ["[BLANK]", "Which structure allows gas exchange?", "(A) stomata", "(B) trichomes"]
+precondition(
+    QuestionTextExtractor.extract(from: unrelatedInputBeforeChoice) == Array(unrelatedInputBeforeChoice.dropFirst()),
+    "an unrelated browser input changed multiple-choice extraction"
 )
 
 let compactLabelInput = [
@@ -104,4 +134,4 @@ let headingExpected = [
 ]
 precondition(QuestionTextExtractor.extract(from: headingInput) == headingExpected, "unlabeled options after a heading were not labeled")
 
-print("Mac extraction regressions passed: fill-in prompt, stomata question, all labeled choices, split labels, unlabeled choices, and screen-control removal.")
+print("Mac extraction regressions passed: inline HTML inputs, selection recovery, fill-in prompts, stomata question, choices, and screen-control removal.")

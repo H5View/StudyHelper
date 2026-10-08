@@ -63,7 +63,7 @@ The selected mode is saved with `UserDefaults` and survives app restarts.
 ### Question Input
 
 - `Selected Text`: the default. It keeps the existing highlighted-text retrieval and clipboard-preserving fallback.
-- `Read Screen`: captures the frontmost app window in memory, recognizes its visible text, and sends likely question lines with their answer choices. OCR and Accessibility text use the same question extraction. It recognizes fill-in-the-blank questions, labeled choices split across lines, and unlabeled choices (which it labels `Option 1`, `Option 2`, and so on for matching). It filters common screen controls such as `Submit` and `Ask Google`. It falls back to Accessibility text when recognition finds nothing. It does not save a screenshot. Screen text is capped at 16,000 characters after extraction.
+- `Read Screen`: captures the frontmost app window in memory, recognizes its visible text, and sends likely question lines with their answer choices. Accessibility text is checked first for browser text inputs, which are represented as `[BLANK]` in context so text on both sides of an inline field is retained. OCR and Accessibility text use the same question extraction. It recognizes fill-in-the-blank questions, labeled choices split across lines, and unlabeled choices (which it labels `Option 1`, `Option 2`, and so on for matching). It filters common screen controls such as `Submit` and `Ask Google`. It does not save a screenshot. Screen text is capped at 16,000 characters after extraction.
 
 Study answers stream into the existing Mac popup as the model produces answer text. Thinking traces are not shown. The Mac client falls back to the JSON answer endpoint when connected to an older bridge that does not support streaming.
 
@@ -78,5 +78,6 @@ If an answer is unclear, choose `Copy Last Screen Text` from the SH menu after u
 ## Notes
 
 - The app uses Accessibility selected-text retrieval first.
+- When selected text stops at an inline browser input, the app checks the ordered Accessibility text for the matching full question and uses `[BLANK]` to preserve the field and its suffix.
 - If that fails, it temporarily simulates `Command+C`, reads the clipboard, and restores the prior clipboard contents.
 - The popup is top-right, always on top, and auto-dismisses after 5 seconds.

@@ -1,6 +1,8 @@
 import Foundation
 
 public enum QuestionTextExtractor {
+    private static let blankMarker = #"(?:_+|\.{3,}|…+|\[\s*(?:blank|text\s+field|input)\s*\]|\(\s*blank\s*\))"#
+
     public static func extract(from lines: [String]) -> [String] {
         let normalizedLines = lines
             .flatMap { $0.components(separatedBy: .newlines) }
@@ -16,7 +18,13 @@ public enum QuestionTextExtractor {
         let contentStart = documentMenuIndex ?? browserAddressIndex
         let content = contentStart.map { Array(normalizedLines.dropFirst($0 + 1)) } ?? normalizedLines
         let choiceIndices = content.indices.filter { isAnswerChoiceLine(content[$0]) }
-        let questionIndices = content.indices.filter { isQuestionLine(content[$0]) }
+        let questionIndices = content.indices.filter { index in
+            guard isQuestionLine(content[index]) else { return false }
+            if index + 1 < content.count && isStandaloneInputMarker(content[index + 1]) {
+                return false
+            }
+            return !isStandaloneInputMarker(content[index]) || hasQuestionTextAround(index, in: content)
+        }
 
         guard !questionIndices.isEmpty else {
             if choiceIndices.count >= 2 {
@@ -41,7 +49,7 @@ public enum QuestionTextExtractor {
                 result.append(contentsOf: options.enumerated().map { "Option \($0.offset + 1): \($0.element)" })
                 return result
             }
-            return content.filter { !isScreenControl($0) }
+            return content.filter { !isScreenControl($0) && !isStandaloneInputMarker($0) }
         }
 
         var selectedIndices = Set<Int>()
@@ -69,6 +77,24 @@ public enum QuestionTextExtractor {
                 continue
             }
 
+            if containsInlineInputMarker(content[index]) {
+                var continuationCount = 0
+                while nextIndex < content.count && !questionIndices.contains(nextIndex) {
+                    if isScreenControl(content[nextIndex]) || isAnswerChoiceLine(content[nextIndex]) || isChoiceHeading(content[nextIndex]) {
+                        break
+                    }
+                    guard continuationCount < 8 else { break }
+                    selectedIndices.insert(nextIndex)
+                    let continuation = content[nextIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                    nextIndex += 1
+                    continuationCount += 1
+                    if continuation.range(of: #"[.!?][\"'’”)]*$"#, options: .regularExpression) != nil {
+                        break
+                    }
+                }
+                continue
+            }
+
             if let options = unlabeledOptions(startingAt: nextIndex, in: content, questionIndices: questionIndices),
                options.count >= 2 {
                 for (offset, option) in options.enumerated() {
@@ -93,9 +119,26 @@ public enum QuestionTextExtractor {
             }
         }
 
-        return content.indices
-            .filter { selectedIndices.contains($0) }
+        let selectedLines = content.indices
+            .filter {
+                selectedIndices.contains($0)
+                    && (!isStandaloneInputMarker(content[$0]) || questionIndices.contains($0))
+            }
             .map { syntheticOptions[$0] ?? content[$0] }
+        return mergeInlineBlankLines(selectedLines)
+    }
+
+    /// Replaces a selected prefix or suffix with its full accessibility-captured
+    /// question when the selection was interrupted by an inline form field.
+    public static func recoverInlineBlankQuestion(selectedText: String, accessibilityText: String) -> String? {
+        let selected = normalizeForComparison(selectedText)
+        guard selected.split(separator: " ").count >= 4 else { return nil }
+
+        let candidates = extract(from: accessibilityText.components(separatedBy: .newlines))
+        return candidates.first { candidate in
+            guard containsBlankMarker(candidate) else { return false }
+            return normalizeForComparison(candidate).hasPrefix(selected)
+        }
     }
 
     private static func isAnswerChoiceLine(_ line: String) -> Bool {
@@ -158,8 +201,8 @@ public enum QuestionTextExtractor {
     private static func isQuestionLine(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isAnswerChoiceLine(trimmed) else { return false }
-        if trimmed.contains("?") || trimmed.range(
-            of: #"\d\s*[+×÷*/−-]\s*\d|_+|\.{3,}|\bfill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\b|\bcomplete\s+(?:the\s+)?(?:blank|sentence|statement)\b|\b(?:missing|insert|supply)\s+(?:the\s+)?(?:words?|terms?|phrases?)\b|\b(?:stands\s+for|is\s+the|are\s+the|is\s+called|is\s+known\s+as)\s*(?:a\(n\))?\s*[.!]?\s*$"#,
+        if trimmed.contains("?") || containsBlankMarker(trimmed) || trimmed.range(
+            of: #"\d\s*[+×÷*/−-]\s*\d|\bfill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\b|\bcomplete\s+(?:the\s+)?(?:blank|sentence|statement)\b|\b(?:missing|insert|supply)\s+(?:the\s+)?(?:words?|terms?|phrases?)\b|\b(?:stands\s+for|is\s+the|are\s+the|is\s+called|is\s+known\s+as)\s*(?:a\(n\))?\s*[.!]?\s*$"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil {
             return true
@@ -198,6 +241,72 @@ public enum QuestionTextExtractor {
     private static func isScreenControl(_ line: String) -> Bool {
         line.range(
             of: #"^(?:submit|next|previous|back|check answer|save and continue|time left|question\s+\d+|review|clear my choice|ask google)\b"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private static func containsBlankMarker(_ line: String) -> Bool {
+        line.range(of: blankMarker, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func isStandaloneInputMarker(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespacesAndNewlines)
+            .range(of: #"^\[BLANK\]$"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func hasQuestionTextAround(_ index: Int, in content: [String]) -> Bool {
+        let precedingLines = Array(content[..<index].reversed().prefix(2))
+        let preceding = precedingLines
+            .filter { !isScreenControl($0) && !isAnswerChoiceLine($0) }
+            .joined(separator: " ")
+        let followingLines = Array(content.dropFirst(index + 1).prefix(3))
+        let following = followingLines
+            .prefix { !isScreenControl($0) && !isAnswerChoiceLine($0) && !isChoiceHeading($0) }
+            .joined(separator: " ")
+        let immediatePrefixIsIncomplete = precedingLines.first.map(isIncompleteQuestionStem) ?? false
+        let hasQuestionPrefix = precedingLines.contains(where: isQuestionLine) && !immediatePrefixIsIncomplete
+        let startsWithAnotherQuestion = followingLines.first.map(isQuestionLine) ?? false
+        return (!hasQuestionPrefix && wordCount(preceding) >= 4)
+            || (!startsWithAnotherQuestion && wordCount(following) >= 4)
+    }
+
+    private static func wordCount(_ text: String) -> Int {
+        text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
+    }
+
+    private static func isIncompleteQuestionStem(_ line: String) -> Bool {
+        line.range(
+            of: #"\b(?:stands\s+for|is\s+the|are\s+the|is\s+called|is\s+known\s+as)\s*(?:a\(n\))?\s*$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private static func mergeInlineBlankLines(_ lines: [String]) -> [String] {
+        var result: [String] = []
+        for line in lines {
+            guard let previous = result.last else {
+                result.append(line)
+                continue
+            }
+            if containsInlineInputMarker(previous) || containsInlineInputMarker(line) {
+                let separator = line.first.map { ",.;:!?)]»”’".contains($0) } == true ? "" : " "
+                result[result.count - 1] = "\(previous)\(separator)\(line)"
+            } else {
+                result.append(line)
+            }
+        }
+        return result
+    }
+
+    private static func normalizeForComparison(_ text: String) -> String {
+        text.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .joined(separator: " ")
+    }
+
+    private static func containsInlineInputMarker(_ line: String) -> Bool {
+        line.range(
+            of: #"\[\s*(?:blank|text\s+field|input)\s*\]"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
     }

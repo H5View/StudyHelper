@@ -26,10 +26,18 @@ struct SelectionCaptureService {
         }
 
         if let selectedText = copySelectedTextUsingAccessibility(), !selectedText.isEmpty {
+            if let recovered = recoverInlineBlankContext(for: selectedText) {
+                debugLog("selectedText recovered inline input context")
+                return recovered
+            }
             return selectedText
         }
 
         if let selectedText = try await copySelectedTextViaClipboardFallback(), !selectedText.isEmpty {
+            if let recovered = recoverInlineBlankContext(for: selectedText) {
+                debugLog("clipboardSelection recovered inline input context")
+                return recovered
+            }
             return selectedText
         }
 
@@ -48,46 +56,70 @@ struct SelectionCaptureService {
     }
 
     func captureReadableScreenText(from targetPID: pid_t?) throws -> String {
-        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
-            throw SelectionCaptureError.screenRecordingRequired
+        // OCR sees the rendered sentence but cannot tell that the blank is an
+        // HTML input. Prefer the ordered Accessibility tree when it exposes one.
+        let accessibilityResult = captureAccessibilityText(prompt: true)
+        if let text = accessibilityResult?.text, text.contains("[BLANK]") {
+            debugLog("screenRead selected Accessibility text with inline input marker")
+            return text
         }
 
-        if let image = captureFrontmostWindow(of: targetPID), let text = recognizeText(in: image), !text.isEmpty {
+        let canCaptureScreen = CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
+        if canCaptureScreen,
+           let image = captureFrontmostWindow(of: targetPID),
+           let text = recognizeText(in: image),
+           !text.isEmpty {
             debugLog("screenRead OCR characters=\(text.count) outputAtLimit=\(text.count >= maxScreenTextLength)")
             return text
         }
 
-        // Some apps expose their text to Accessibility even when the image has no OCR results.
-        guard isAccessibilityTrusted(prompt: true) else {
-            throw SelectionCaptureError.noReadableScreenText
+        if let text = accessibilityResult?.text, !text.isEmpty {
+            return text
         }
+
+        if !canCaptureScreen {
+            throw SelectionCaptureError.screenRecordingRequired
+        }
+        throw SelectionCaptureError.noReadableScreenText
+    }
+
+    private func recoverInlineBlankContext(for selectedText: String) -> String? {
+        let selected = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selected.contains("[BLANK]"),
+              selected.split(whereSeparator: \.isWhitespace).count >= 4,
+              let lastCharacter = selected.last,
+              !".!?".contains(lastCharacter),
+              let result = captureAccessibilityText(prompt: false),
+              !result.text.isEmpty
+        else {
+            return nil
+        }
+        return QuestionTextExtractor.recoverInlineBlankQuestion(
+            selectedText: selectedText,
+            accessibilityText: result.text
+        )
+    }
+
+    private func captureAccessibilityText(prompt: Bool) -> ScreenReadResult? {
+        guard isAccessibilityTrusted(prompt: prompt) else { return nil }
 
         let systemWideElement = AXUIElementCreateSystemWide()
         guard let focusedApplication = copyElementAttribute(
             kAXFocusedApplicationAttribute as CFString,
             from: systemWideElement
         ) else {
-            throw SelectionCaptureError.noReadableScreenText
+            return nil
         }
 
-        let focusedElement = copyElementAttribute(
-            kAXFocusedUIElementAttribute as CFString,
-            from: systemWideElement
-        )
         let focusedWindow = copyElementAttribute(
             kAXFocusedWindowAttribute as CFString,
             from: focusedApplication
         )
-        let result = collectReadableText(from: [focusedElement, focusedWindow, focusedApplication].compactMap { $0 })
+        let result = collectReadableText(from: [focusedWindow ?? focusedApplication])
         debugLog(
-            "screenRead inspected=\(result.inspectedElementCount) strings=\(result.stringCount) characters=\(result.text.count) sourceTruncated=\(result.sourceTruncated) outputTruncated=\(result.outputTruncated)"
+            "accessibilityCapture inspected=\(result.inspectedElementCount) strings=\(result.stringCount) inputs=\(result.inputCount) characters=\(result.text.count) sourceTruncated=\(result.sourceTruncated) outputTruncated=\(result.outputTruncated)"
         )
-
-        guard !result.text.isEmpty else {
-            throw SelectionCaptureError.noReadableScreenText
-        }
-
-        return result.text
+        return result
     }
 
     private func captureFrontmostWindow(of pid: pid_t?) -> CGImage? {
@@ -162,31 +194,42 @@ struct SelectionCaptureService {
     }
 
     private func collectReadableText(from rootElements: [AXUIElement]) -> ScreenReadResult {
-        var queue = rootElements.map { (element: $0, depth: 0) }
+        var queue = rootElements.map { (element: $0, depth: 0, inWebContent: false) }
         var strings: [String] = []
-        var uniqueStrings = Set<String>()
         var inspectedElementCount = 0
         var characterCount = 0
+        var inputCount = 0
 
         while !queue.isEmpty && inspectedElementCount < 1_500 && characterCount < maxAccessibilityCaptureLength {
-            let next = queue.removeFirst()
+            let next = queue.removeLast()
             inspectedElementCount += 1
 
-            for attribute in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
-                guard let value = copyAttribute(attribute as CFString, from: next.element) as? String else {
-                    continue
-                }
+            let role = copyAttribute(kAXRoleAttribute as CFString, from: next.element) as? String ?? ""
+            let isWebContent = next.inWebContent || role == "AXWebArea"
+            if isWebContent && isTextInputRole(role) {
+                strings.append("[BLANK]")
+                characterCount += "[BLANK]".count + 1
+                inputCount += 1
+                continue
+            }
 
-                let normalized = normalizeSelection(value)
-                if !normalized.isEmpty && uniqueStrings.insert(normalized).inserted {
+            let children = next.depth < 18 ? copyVisibleChildren(from: next.element) : []
+            if children.isEmpty {
+                for attribute in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
+                    guard let value = copyAttribute(attribute as CFString, from: next.element) as? String else {
+                        continue
+                    }
+                    let normalized = normalizeSelection(value)
+                    guard !normalized.isEmpty else { continue }
                     strings.append(normalized)
                     characterCount += normalized.count + 1
+                    break
                 }
             }
 
-            guard next.depth < 18 else { continue }
-            let children = copyVisibleChildren(from: next.element)
-            queue.append(contentsOf: children.map { (element: $0, depth: next.depth + 1) })
+            queue.append(contentsOf: children.reversed().map {
+                (element: $0, depth: next.depth + 1, inWebContent: isWebContent)
+            })
         }
 
         let rawText = strings.joined(separator: "\n")
@@ -197,9 +240,18 @@ struct SelectionCaptureService {
             text: String(extractedText.prefix(maxScreenTextLength)),
             inspectedElementCount: inspectedElementCount,
             stringCount: strings.count,
+            inputCount: inputCount,
             sourceTruncated: !queue.isEmpty && (inspectedElementCount >= 1_500 || characterCount >= maxAccessibilityCaptureLength),
             outputTruncated: extractedText.count > maxScreenTextLength
         )
+    }
+
+    private func isTextInputRole(_ role: String) -> Bool {
+        [
+            kAXTextFieldRole as String,
+            kAXTextAreaRole as String,
+            kAXComboBoxRole as String
+        ].contains(role)
     }
 
     private func copyVisibleChildren(from element: AXUIElement) -> [AXUIElement] {
@@ -285,6 +337,7 @@ private struct ScreenReadResult {
     let text: String
     let inspectedElementCount: Int
     let stringCount: Int
+    let inputCount: Int
     let sourceTruncated: Bool
     let outputTruncated: Bool
 }
