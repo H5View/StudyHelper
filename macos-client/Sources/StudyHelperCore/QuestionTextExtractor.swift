@@ -17,6 +17,14 @@ public enum QuestionTextExtractor {
         }
         let contentStart = documentMenuIndex ?? browserAddressIndex
         let content = contentStart.map { Array(normalizedLines.dropFirst($0 + 1)) } ?? normalizedLines
+
+        // Connect exposes a clear question-type heading. Treat it as a boundary
+        // and extract the prompt that follows instead of interpreting nearby
+        // accessibility labels (which can include unrelated controls) as choices.
+        if let fillInHeading = content.firstIndex(where: isFillInBlankHeading) {
+            return extractFillInQuestion(after: fillInHeading, in: content)
+        }
+
         let choiceIndices = content.indices.filter { isAnswerChoiceLine(content[$0]) }
         let questionIndices = content.indices.filter { index in
             guard isQuestionLine(content[index]) else { return false }
@@ -95,8 +103,10 @@ public enum QuestionTextExtractor {
                 continue
             }
 
+            let questionLine = content[index].trimmingCharacters(in: .whitespacesAndNewlines)
             if let options = unlabeledOptions(startingAt: nextIndex, in: content, questionIndices: questionIndices),
-               options.count >= 2 {
+               options.count >= 2,
+               isLikelyMultipleChoicePrompt(questionLine) {
                 for (offset, option) in options.enumerated() {
                     syntheticOptions[nextIndex + offset] = "Option \(offset + 1): \(option)"
                     selectedIndices.insert(nextIndex + offset)
@@ -104,7 +114,6 @@ public enum QuestionTextExtractor {
                 continue
             }
 
-            let questionLine = content[index].trimmingCharacters(in: .whitespacesAndNewlines)
             let questionIsComplete = questionLine.contains("?") || questionLine.hasSuffix("=")
             var continuationCount = 0
             while nextIndex < content.count && !questionIndices.contains(nextIndex) {
@@ -145,6 +154,78 @@ public enum QuestionTextExtractor {
         line.range(
             of: #"^\s*(?:Option\s+\d+\s*[:.)-]|\([A-Za-z]\)|[A-Za-z][.)]|[A-Za-z]\s*[-:])(?:\s*\S.*)?\s*$"#,
             options: .regularExpression
+        ) != nil
+    }
+
+    private static func isFillInBlankHeading(_ line: String) -> Bool {
+        line.range(
+            of: #"^\s*(?:fill\s+in\s+the\s+blank\s+question|fill\s+in\s+the\s+blank)\s*:?\s*$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    private static func extractFillInQuestion(after headingIndex: Int, in content: [String]) -> [String] {
+        var questionLines: [String] = []
+        for rawLine in content.dropFirst(headingIndex + 1) {
+            if isFillInSectionBoundary(rawLine) {
+                if !questionLines.isEmpty { break }
+                continue
+            }
+
+            let line = strippingGeneratedOptionLabel(rawLine)
+            guard !line.isEmpty, !isQuestionIdentifier(line) else { continue }
+
+            if questionLines.isEmpty {
+                guard wordCount(line) >= 6, !isScreenControl(line) else { continue }
+            } else if isScreenControl(line) || isAnswerChoiceLine(rawLine) {
+                break
+            }
+
+            questionLines.append(line)
+            if line.range(of: #"[.!?][\"'’”)]*$"#, options: .regularExpression) != nil {
+                break
+            }
+        }
+
+        guard !questionLines.isEmpty else {
+            return [
+                "Question type: fill-in-the-blank",
+                "Capture incomplete: question text unavailable"
+            ]
+        }
+
+        var question = mergeInlineBlankLines(questionLines).joined(separator: " ")
+        // In the captured Connect screen, the inline field follows the visible
+        // article in the explicit fill-in stem; normalize its trailing AX text
+        // artifact to the answer slot expected at that position.
+        question = question.replacingOccurrences(
+            of: #"(?i)(\bis\s+called\s+)al\s*$"#,
+            with: "$1a [BLANK]",
+            options: .regularExpression
+        )
+        if question.range(of: #"\[\s*BLANK\s*\]$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            question += "."
+        }
+
+        return ["Question type: fill-in-the-blank", question]
+    }
+
+    private static func strippingGeneratedOptionLabel(_ line: String) -> String {
+        line.replacingOccurrences(
+            of: #"^\s*Option\s+\d+\s*[:.)-]\s*"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isQuestionIdentifier(_ line: String) -> Bool {
+        line.range(of: #"^\s*\d{1,3}\s*[A-Z]\)?\s*$"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func isFillInSectionBoundary(_ line: String) -> Bool {
+        line.range(
+            of: #"^\s*(?:[•·]\s*)?(?:need help\?|rate your confidence|high$|medium$|low$|he reading$|©|privacy center$|terms of use$|submit\b|ask gemini\b|ask google\b|learning\.mheducation\.com\b)"#,
+            options: [.regularExpression, .caseInsensitive]
         ) != nil
     }
 
@@ -200,7 +281,7 @@ public enum QuestionTextExtractor {
 
     private static func isQuestionLine(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isAnswerChoiceLine(trimmed) else { return false }
+        guard !isAnswerChoiceLine(trimmed), !isScreenControl(trimmed) else { return false }
         if trimmed.contains("?") || containsBlankMarker(trimmed) || trimmed.range(
             of: #"\d\s*[+×÷*/−-]\s*\d|\bfill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\b|\bcomplete\s+(?:the\s+)?(?:blank|sentence|statement)\b|\b(?:missing|insert|supply)\s+(?:the\s+)?(?:words?|terms?|phrases?)\b|\b(?:stands\s+for|is\s+the|are\s+the|is\s+called|is\s+known\s+as)\s*(?:a\(n\))?\s*[.!]?\s*$"#,
             options: [.regularExpression, .caseInsensitive]
@@ -219,6 +300,15 @@ public enum QuestionTextExtractor {
 
     private static func isChoiceHeading(_ line: String) -> Bool {
         line.range(of: #"^(?:options?|answer choices|choices)\s*:?$"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func isLikelyMultipleChoicePrompt(_ line: String) -> Bool {
+        containsBlankMarker(line)
+            || line.contains("?")
+            || line.range(
+                of: #"^\s*(?:choose|select|which|what|identify|name|pick)\b"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil
     }
 
     private static func unlabeledOptions(
@@ -240,7 +330,7 @@ public enum QuestionTextExtractor {
 
     private static func isScreenControl(_ line: String) -> Bool {
         line.range(
-            of: #"^(?:submit|next|previous|back|check answer|save and continue|time left|question\s+\d+|review|clear my choice|ask google)\b"#,
+            of: #"^\s*(?:[•·]\s*)?(?:submit|next|previous|back|check answer|save and continue|time left|question\s+\d+|review|clear my choice|ask google|ask gemini|need help\?|rate your confidence|high$|medium$|low$|privacy center$|terms of use$|he reading$|©|learning\.mheducation\.com)(?:\b|[^a-z]|$)"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
     }

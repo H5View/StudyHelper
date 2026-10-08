@@ -23,6 +23,11 @@ let package = Package(
             name: "StudyHelperCoreRegression",
             dependencies: ["StudyHelperCore"],
             path: "Tests/StudyHelperCoreRegression"
+        ),
+        .executableTarget(
+            name: "QuestionTextExtractorCLI",
+            dependencies: ["StudyHelperCore"],
+            path: "Tests/QuestionTextExtractorCLI"
         )
     ]
 )

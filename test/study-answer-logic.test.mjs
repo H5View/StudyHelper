@@ -51,6 +51,40 @@ test('fill-in-the-blank and short-answer types do not enable thinking just becau
   assert.equal(getThinkingDecision('What is osmosis?').think, false);
 });
 
+test('the captured Connect fill-in screen is not classified from generic Option labels', () => {
+  const captured = [
+    '• Ask Gemini',
+    '→',
+    '• learning.mheducation.com/static/awd/index.html',
+    'Option 1: # School',
+    'Option 2: Mc',
+    'Option 3: Hill',
+    'Option 4: Graw',
+    'Option 5: Exit Assignment ×',
+    'Option 6: 8 of 54 Concepts completed',
+    'Fill in the Blank Question',
+    'Option 1: 5D)',
+    'Option 2: In a chloroplast, a stack of flattened thylakoid sacs is called al',
+    '• Need help? Review these concept resources.',
+    'Option 1: Rate your confidence to submit your answer.',
+    'Option 2: High',
+    'Option 3: Medium',
+    'Option 4: Low',
+    'Option 5: HE Reading',
+    'Option 6: © 2026 McGraw Hill. All Rights Reserved. Privacy Center',
+    'Option 7: Terms of Use'
+  ].join('\n');
+
+  assert.equal(detectQuestionType(captured), 'fill-in-the-blank');
+  assert.deepEqual(parseChoiceGroups(captured), []);
+  assert.deepEqual(getThinkingDecision(captured), {
+    think: false,
+    reason: 'straightforward-fill-in-the-blank',
+    questionType: 'fill-in-the-blank',
+    choiceCount: 0
+  });
+});
+
 test('fill-in formatting extracts only reliable blank spans at the beginning, middle, or end', () => {
   assert.equal(
     extractFillInAnswer(

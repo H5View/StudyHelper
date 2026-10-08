@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +31,7 @@ const ollama = createServer(async (request, response) => {
           ? 'Option 2: Plants absorb water from the ground through their'
           : 'roots' :
       question.includes('NO_RETRY_FILL') ? 'Unable to determine' :
+      question.includes('In a chloroplast, a stack of flattened thylakoid sacs is called a [BLANK].') ? 'granum' :
       question.includes('Option 4: stomata') ? 'stomata' :
         question.includes('double membrane-bounded organelle')
         ? sameQuestionRequestCount === 1
@@ -93,7 +94,7 @@ const bridge = spawn(process.execPath, ['server.mjs'], {
     OLLAMA_KEEP_ALIVE: '5m',
     OLLAMA_NUM_PREDICT: '96',
     OLLAMA_RETRY_NUM_PREDICT: '128',
-    STUDY_ASSISTANT_DEBUG_INPUT: '1'
+    STUDY_ASSISTANT_DEBUG_INPUT: '0'
   },
   stdio: ['ignore', 'pipe', 'pipe']
 });
@@ -231,13 +232,55 @@ try {
   assert.equal(calls[21].think, false, 'short retry should disable thinking');
   assert.equal(calls[21].options.num_predict, 96, 'retry must respect the configured output token limit');
 
+  const capturedConnectWindowText = [
+    '• Ask Gemini',
+    '→',
+    '• learning.mheducation.com/static/awd/index.html',
+    'Option 1: # School',
+    'Option 2: Mc',
+    'Option 3: Hill',
+    'Option 4: Graw',
+    'Option 5: Exit Assignment ×',
+    'Option 6: 8 of 54 Concepts completed',
+    'Fill in the Blank Question',
+    'Option 1: 5D)',
+    'Option 2: In a chloroplast, a stack of flattened thylakoid sacs is called al',
+    '• Need help? Review these concept resources.',
+    'Option 1: Rate your confidence to submit your answer.',
+    'Option 2: High',
+    'Option 3: Medium',
+    'Option 4: Low',
+    'Option 5: HE Reading',
+    'Option 6: © 2026 McGraw Hill. All Rights Reserved. Privacy Center',
+    'Option 7: Terms of Use'
+  ].join('\n');
+  const cleanedMacCapture = execFileSync(
+    'swift',
+    ['run', '--quiet', '--package-path', resolve(repoRoot, 'macos-client'), 'QuestionTextExtractorCLI'],
+    { cwd: repoRoot, input: capturedConnectWindowText, encoding: 'utf8' }
+  ).trim();
+  assert.equal(cleanedMacCapture, [
+    'Question type: fill-in-the-blank',
+    'In a chloroplast, a stack of flattened thylakoid sacs is called a [BLANK].'
+  ].join('\n'));
+  const capturedFillIn = await postStream(bridgePort, cleanedMacCapture);
+  assert.equal(capturedFillIn.answer, 'granum', 'the Mac-captured fill-in answer did not reach the final stream output');
+  assert.deepEqual(
+    calls.at(-1).messages.at(-1).content,
+    cleanedMacCapture,
+    'the cleaned Mac question did not reach the bridge unchanged'
+  );
+  assert.equal(calls.at(-1).think, false);
+  assert.match(calls.at(-1).messages[0].content, /This is a fill-in-the-blank question/);
+  assert.equal(capturedFillIn.events.filter((event) => event.type === 'delta').map((event) => event.content).join(''), 'granum');
+
   assert.match(logs, /questionType=multiple-choice .*think=false thinkReason=straightforward-multiple-choice detectedChoices=4/);
   assert.match(logs, /questionType=fill-in-the-blank .*think=false thinkReason=straightforward-fill-in-the-blank detectedChoices=0/);
-  assert.match(logs, /Name: \[redacted\]/);
-  assert.match(logs, /\[email\]/);
+  assert.doesNotMatch(logs, /In a chloroplast, a stack of flattened thylakoid sacs/);
+  assert.doesNotMatch(logs, /Option 1: # School/);
   assert.equal(logs.includes('sample.student@example.test'), false, 'opt-in trace did not redact email');
   assert.equal(logs.includes('PRIVATE_TRACE'), false, 'hidden thinking was logged');
-  console.log('Bridge integration regressions passed: model/context, thinking, retries, hidden thinking, choice mapping, and redacted input trace.');
+  console.log('Bridge integration regressions passed: Mac capture extraction, final fill-in output, model/context, thinking, retries, hidden thinking, choices, and input privacy.');
 } finally {
   bridge.kill('SIGTERM');
   await Promise.race([once(bridge, 'exit'), delay(3000)]);

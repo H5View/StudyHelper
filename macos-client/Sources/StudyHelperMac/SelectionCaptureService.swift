@@ -247,10 +247,12 @@ struct SelectionCaptureService {
     }
 
     private func isTextInputRole(_ role: String) -> Bool {
+        // AXComboBox is a choice control, not an editable answer field. Treat
+        // only actual text-entry roles as inline blanks so select/radio options
+        // remain ordinary text and cannot turn a question into a choice group.
         [
             kAXTextFieldRole as String,
-            kAXTextAreaRole as String,
-            kAXComboBoxRole as String
+            kAXTextAreaRole as String
         ].contains(role)
     }
 

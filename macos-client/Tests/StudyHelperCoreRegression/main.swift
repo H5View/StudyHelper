@@ -134,4 +134,48 @@ let headingExpected = [
 ]
 precondition(QuestionTextExtractor.extract(from: headingInput) == headingExpected, "unlabeled options after a heading were not labeled")
 
+let questionWithOnlyControls = [
+    "Which structure allows gas exchange?",
+    "• Need help? Review these concept resources.",
+    "Rate your confidence to submit your answer.",
+    "High",
+    "Medium",
+    "Low"
+]
+precondition(
+    QuestionTextExtractor.extract(from: questionWithOnlyControls) == ["Which structure allows gas exchange?"],
+    "screen controls were mislabeled as answer choices: \(QuestionTextExtractor.extract(from: questionWithOnlyControls))"
+)
+
+let capturedConnectFillInText = [
+    "• Ask Gemini",
+    "→",
+    "• learning.mheducation.com/static/awd/index.html",
+    "Option 1: # School",
+    "Option 2: Mc",
+    "Option 3: Hill",
+    "Option 4: Graw",
+    "Option 5: Exit Assignment ×",
+    "Option 6: 8 of 54 Concepts completed",
+    "Fill in the Blank Question",
+    "Option 1: 5D)",
+    "Option 2: In a chloroplast, a stack of flattened thylakoid sacs is called al",
+    "• Need help? Review these concept resources.",
+    "Option 1: Rate your confidence to submit your answer.",
+    "Option 2: High",
+    "Option 3: Medium",
+    "Option 4: Low",
+    "Option 5: HE Reading",
+    "Option 6: © 2026 McGraw Hill. All Rights Reserved. Privacy Center",
+    "Option 7: Terms of Use"
+]
+let cleanedConnectFillInQuestion = [
+    "Question type: fill-in-the-blank",
+    "In a chloroplast, a stack of flattened thylakoid sacs is called a [BLANK]."
+]
+precondition(
+    QuestionTextExtractor.extract(from: capturedConnectFillInText) == cleanedConnectFillInQuestion,
+    "Connect Accessibility labels or page controls contaminated the fill-in question"
+)
+
 print("Mac extraction regressions passed: inline HTML inputs, selection recovery, fill-in prompts, stomata question, choices, and screen-control removal.")
