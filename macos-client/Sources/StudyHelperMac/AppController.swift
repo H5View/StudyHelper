@@ -3,6 +3,7 @@ import Foundation
 
 private enum DefaultsKey {
     static let answerDisplayMode = "answerDisplayMode"
+    static let questionInputMode = "questionInputMode"
 }
 
 @MainActor
@@ -15,13 +16,21 @@ final class AppController: NSObject {
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
     private var answerDisplayMenuItem: NSMenuItem?
+    private var questionInputMenuItem: NSMenuItem?
     private var activeRequest: Task<Void, Never>?
+    private var lastScreenText: String?
     private var latestRequestID = UUID()
     private var lastHotKeyTime = Date.distantPast
     private var answerDisplayMode = UserDefaults.standard.answerDisplayMode {
         didSet {
             UserDefaults.standard.answerDisplayMode = answerDisplayMode
             refreshAnswerDisplayMenu()
+        }
+    }
+    private var questionInputMode = UserDefaults.standard.questionInputMode {
+        didSet {
+            UserDefaults.standard.questionInputMode = questionInputMode
+            refreshQuestionInputMenu()
         }
     }
 
@@ -65,10 +74,27 @@ final class AppController: NSObject {
             keyEquivalent: ""
         ).target = self
 
+        menu.addItem(
+            withTitle: "Open Screen Recording Settings",
+            action: #selector(openScreenRecordingSettings),
+            keyEquivalent: ""
+        ).target = self
+
         let answerDisplayItem = NSMenuItem(title: "Answer Display", action: nil, keyEquivalent: "")
         answerDisplayItem.submenu = makeAnswerDisplayMenu()
         menu.addItem(answerDisplayItem)
         self.answerDisplayMenuItem = answerDisplayItem
+
+        let questionInputItem = NSMenuItem(title: "Question Input", action: nil, keyEquivalent: "")
+        questionInputItem.submenu = makeQuestionInputMenu()
+        menu.addItem(questionInputItem)
+        self.questionInputMenuItem = questionInputItem
+
+        menu.addItem(
+            withTitle: "Copy Last Screen Text",
+            action: #selector(copyLastScreenText),
+            keyEquivalent: ""
+        ).target = self
 
         menu.addItem(.separator())
 
@@ -82,6 +108,7 @@ final class AppController: NSObject {
         self.statusItem = item
         self.statusMenuItem = statusItem
         refreshAnswerDisplayMenu()
+        refreshQuestionInputMenu()
     }
 
     private func makeAnswerDisplayMenu() -> NSMenu {
@@ -110,6 +137,32 @@ final class AppController: NSObject {
         }
     }
 
+    private func makeQuestionInputMenu() -> NSMenu {
+        let submenu = NSMenu(title: "Question Input")
+
+        for mode in [QuestionInputMode.selectedText, .readScreen] {
+            let item = NSMenuItem(
+                title: mode.menuTitle,
+                action: #selector(selectQuestionInputMode(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = mode.rawValue
+            submenu.addItem(item)
+        }
+
+        return submenu
+    }
+
+    private func refreshQuestionInputMenu() {
+        guard let items = questionInputMenuItem?.submenu?.items else { return }
+
+        for item in items {
+            let rawValue = item.representedObject as? String
+            item.state = rawValue == questionInputMode.rawValue ? .on : .off
+        }
+    }
+
     private func handleHotKey() {
         let now = Date()
         guard now.timeIntervalSince(lastHotKeyTime) >= configuration.hotKeyDebounceInterval else {
@@ -120,6 +173,11 @@ final class AppController: NSObject {
         latestRequestID = UUID()
         let requestID = latestRequestID
         let outputMode = answerDisplayMode
+        let inputMode = questionInputMode
+        let screenTargetPID = inputMode == .readScreen ? selectionCaptureService.focusedApplicationPID() : nil
+        if inputMode == .readScreen {
+            lastScreenText = nil
+        }
 
         activeRequest?.cancel()
         if outputMode.sendsPopupToMac {
@@ -133,10 +191,17 @@ final class AppController: NSObject {
             guard let self else { return }
 
             do {
-                let selectedText = try await self.selectionCaptureService.captureSelectedText()
+                let questionText: String
+                switch inputMode {
+                case .selectedText:
+                    questionText = try await self.selectionCaptureService.captureSelectedText()
+                case .readScreen:
+                    questionText = try self.selectionCaptureService.captureReadableScreenText(from: screenTargetPID)
+                    self.lastScreenText = questionText
+                }
                 try Task.checkCancellation()
 
-                let answer = try await self.bridgeClient.fetchStudyAnswer(for: selectedText, outputMode: outputMode)
+                let answer = try await self.bridgeClient.fetchStudyAnswer(for: questionText, outputMode: outputMode)
                 try Task.checkCancellation()
 
                 await MainActor.run {
@@ -173,6 +238,10 @@ final class AppController: NSObject {
             return "Accessibility required"
         case SelectionCaptureError.noTextSelected:
             return "No text selected"
+        case SelectionCaptureError.noReadableScreenText:
+            return "No readable screen text"
+        case SelectionCaptureError.screenRecordingRequired:
+            return "Screen Recording required"
         case BridgeClientError.pcUnavailable:
             return "PC unavailable"
         case BridgeClientError.answerTimedOut:
@@ -194,6 +263,18 @@ final class AppController: NSObject {
         }
 
         answerDisplayMode = mode
+    }
+
+    @objc
+    private func selectQuestionInputMode(_ sender: NSMenuItem) {
+        guard
+            let rawValue = sender.representedObject as? String,
+            let mode = QuestionInputMode(rawValue: rawValue)
+        else {
+            return
+        }
+
+        questionInputMode = mode
     }
 
     @objc
@@ -226,6 +307,24 @@ final class AppController: NSObject {
     }
 
     @objc
+    private func openScreenRecordingSettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc
+    private func copyLastScreenText() {
+        guard let lastScreenText else {
+            popupController.showMessage("No screen text captured yet", autoDismissAfter: configuration.popupDuration)
+            return
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lastScreenText, forType: .string)
+        popupController.showMessage("Screen text copied", autoDismissAfter: configuration.popupDuration)
+    }
+
+    @objc
     private func quitApp() {
         NSApp.terminate(nil)
     }
@@ -245,6 +344,22 @@ private extension UserDefaults {
         }
         set {
             set(newValue.rawValue, forKey: DefaultsKey.answerDisplayMode)
+        }
+    }
+
+    var questionInputMode: QuestionInputMode {
+        get {
+            guard
+                let rawValue = string(forKey: DefaultsKey.questionInputMode),
+                let mode = QuestionInputMode(rawValue: rawValue)
+            else {
+                return .selectedText
+            }
+
+            return mode
+        }
+        set {
+            set(newValue.rawValue, forKey: DefaultsKey.questionInputMode)
         }
     }
 }

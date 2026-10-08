@@ -43,9 +43,12 @@ STUDY_ASSISTANT_PORT=8788
 STUDY_ASSISTANT_TOKEN=change-me
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=gemma4:latest
-OLLAMA_TIMEOUT_MS=180000
-STUDY_ASSISTANT_MAX_INPUT_LENGTH=4000
+OLLAMA_NUM_CTX=8192
+OLLAMA_TIMEOUT_MS=600000
+STUDY_ASSISTANT_MAX_INPUT_LENGTH=16000
 ```
+
+`OLLAMA_NUM_CTX` is sent to Ollama as `options.num_ctx` on every chat request. The default is 8,192 tokens; set it to `4096` in `.env` and restart the bridge if the larger context causes GPU memory pressure. The bridge logs the configured context, Ollama's prompt and generated token counts, estimated context utilization, and request timings. These logs do not include question text or model answers.
 
 ## Endpoints
 
@@ -89,7 +92,9 @@ Example response:
 }
 ```
 
-If the input is unclear, the bridge returns:
+If the model initially says it cannot determine an answer, the bridge retries once with stricter best-guess instructions. When answer choices are visible, it should choose the most plausible option. The retry can add time only for questions the model initially declines.
+
+For example, if there are no usable choices and no reasonable answer can be inferred:
 
 ```json
 {
@@ -186,4 +191,4 @@ curl -X POST http://192.168.x.x:8788/study-answer \
 
 - The model is loaded by Ollama on the first real request; you do not need to run `ollama run gemma4:latest` manually.
 - `GET /health` checks Ollama reachability only.
-- The bridge trims input, rejects empty requests, limits selected text size, and returns clean JSON errors.
+- The bridge trims input, rejects empty requests, limits selected text to 16,000 characters by default (configurable with `STUDY_ASSISTANT_MAX_INPUT_LENGTH`), and returns clean JSON errors.

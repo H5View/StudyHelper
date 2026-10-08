@@ -23,18 +23,25 @@ swift run StudyHelperMac
 
 ## Permissions
 
-Accessibility is required for selected-text capture and the clipboard fallback.
+Accessibility is required for selected-text capture and the clipboard fallback. Read Screen needs Screen Recording permission so macOS can capture the frontmost window for text recognition.
 
 Path:
 
 `System Settings > Privacy & Security > Accessibility`
+
+`System Settings > Privacy & Security > Screen Recording`
+
+After enabling Screen Recording for StudyHelper, quit and reopen the Mac app.
 
 ## Menu
 
 - `Status`
 - `Test Connection`
 - `Open Accessibility Settings`
+- `Open Screen Recording Settings`
 - `Answer Display`
+- `Question Input`
+- `Copy Last Screen Text`
 - `Quit`
 
 ### Answer Display
@@ -43,6 +50,15 @@ Path:
 - `Windows PC`: answer is sent to the Windows viewer and the Mac suppresses the success popup
 
 The selected mode is saved with `UserDefaults` and survives app restarts.
+
+### Question Input
+
+- `Selected Text`: the default. It keeps the existing highlighted-text retrieval and clipboard-preserving fallback.
+- `Read Screen`: captures the frontmost app window in memory, recognizes its visible text, and sends likely question lines with their answer choices. OCR and Accessibility text use the same question extraction. It falls back to Accessibility text when recognition finds nothing. It does not save a screenshot. Screen text is capped at 16,000 characters after extraction.
+
+If Screen Recording access is missing, StudyHelper displays `Screen Recording required`. If the frontmost window contains no recognizable text, it displays `No readable screen text`. The selected input mode is saved with `UserDefaults` and survives app restarts.
+
+If an answer is unclear, choose `Copy Last Screen Text` from the SH menu after using Read Screen, then paste it into a text editor to inspect exactly what was sent to the bridge. The text is kept only in the running Mac app until you copy it.
 
 ## Hotkey
 

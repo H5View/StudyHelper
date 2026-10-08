@@ -29,7 +29,7 @@ echo The Windows answer popup will start automatically.
 echo Keep the bridge window open while using the bridge.
 echo.
 
-start "StudyHelper Bridge" cmd /k "cd /d ""%~dp0"" ^&^& npm.cmd start"
+start "StudyHelper Bridge" /D "%~dp0" cmd /k npm.cmd start
 
 timeout /t 2 /nobreak >nul
 start "StudyHelper Popup" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0windows-answer-popup.ps1"

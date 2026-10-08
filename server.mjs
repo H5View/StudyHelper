@@ -9,8 +9,9 @@ const PORT = parsePort(env.STUDY_ASSISTANT_PORT, 8788);
 const TOKEN = env.STUDY_ASSISTANT_TOKEN || 'change-me';
 const OLLAMA_BASE_URL = (env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
 const OLLAMA_MODEL = env.OLLAMA_MODEL || 'gemma4:latest';
-const OLLAMA_TIMEOUT_MS = parsePositiveInt(env.OLLAMA_TIMEOUT_MS, 180000);
-const MAX_INPUT_LENGTH = parsePositiveInt(env.STUDY_ASSISTANT_MAX_INPUT_LENGTH, 4000);
+const OLLAMA_TIMEOUT_MS = parsePositiveInt(env.OLLAMA_TIMEOUT_MS, 600000);
+const OLLAMA_NUM_CTX = parsePositiveInt(env.OLLAMA_NUM_CTX, 8192);
+const MAX_INPUT_LENGTH = parsePositiveInt(env.STUDY_ASSISTANT_MAX_INPUT_LENGTH, 16000);
 const VALID_OUTPUT_MODES = new Set(['mac', 'windows', 'both']);
 const VIEWER_HTML = `<!doctype html>
 <html lang="en">
@@ -98,16 +99,20 @@ let latestAnswerState = {
   outputMode: null,
   status: 'idle'
 };
+let nextStudyRequestId = 0;
 
 const SYSTEM_PROMPT = [
   'Answer study/practice questions.',
+  'The input may be text recognized from an entire app window. Ignore navigation, menus, buttons, ads, and other interface text; find the visible question and its answer choices.',
   'Detect whether there is one question or multiple questions.',
   "For one question, return only 'LETTER — answer' or a short answer.",
   "For multiple questions, answer every question, preserve numbering, keep the same order, and return only lines like '1. LETTER — answer'.",
   'Never combine multiple questions into one answer.',
+  'When answer choices are present, always choose the most plausible choice, even when uncertain. Do not refuse to choose or say the question is unclear if any choice is reasonably plausible.',
+  'If the question is incomplete or partly unreadable, use the visible context and choices to make the best guess.',
   'No explanations or reasoning.',
   'Keep responses extremely concise.',
-  "If unclear, return exactly 'Unable to determine'."
+  'Only say you cannot determine an answer when there are no usable choices and no reasonable answer can be inferred.'
 ].join(' ');
 
 const server = createServer(async (req, res) => {
@@ -189,22 +194,54 @@ server.listen(PORT, HOST, () => {
   console.log(`Study assistant bridge listening on http://${HOST}:${PORT}`);
   console.log(`Ollama base URL: ${OLLAMA_BASE_URL}`);
   console.log(`Model: ${OLLAMA_MODEL}`);
+  console.log(`Ollama context window: ${OLLAMA_NUM_CTX} tokens`);
+  console.log(`Maximum input: ${MAX_INPUT_LENGTH} characters`);
   if (lanAddresses.length > 0) {
     console.log(`LAN access: ${lanAddresses.map((address) => `http://${address}:${PORT}`).join(', ')}`);
   }
 });
 
 async function generateAnswer(text) {
+  const requestId = ++nextStudyRequestId;
+  const startedAt = performance.now();
+  let attempts = 0;
+
+  console.log(`study-answer started requestId=${requestId} chars=${text.length} num_ctx=${OLLAMA_NUM_CTX}`);
+  try {
+    attempts += 1;
+    const firstAnswer = await requestModel(text, SYSTEM_PROMPT, requestId, 'initial');
+    if (!isUncertainAnswer(firstAnswer)) {
+      return firstAnswer;
+    }
+
+    console.log('Model returned an uncertain answer; retrying with best-guess instructions.');
+    const bestGuessPrompt = [
+      'Solve the study question again using the input and all visible answer choices.',
+      'You must select the most plausible answer choice whenever choices are present, even if the image text is incomplete or you are uncertain.',
+      'Do not say Unable to determine, do not refuse, and do not explain your uncertainty.',
+      'For multiple questions, answer every question in order with its number and selected letter.'
+    ].join(' ');
+    attempts += 1;
+    return await requestModel(text, bestGuessPrompt, requestId, 'best-guess');
+  } finally {
+    console.log(
+      `study-answer finished requestId=${requestId} elapsedMs=${Math.round(performance.now() - startedAt)} attempts=${attempts} chars=${text.length}`
+    );
+  }
+}
+
+async function requestModel(text, systemPrompt, requestId, attempt) {
   const payload = {
     model: OLLAMA_MODEL,
     stream: false,
     options: {
-      temperature: 0
+      temperature: 0,
+      num_ctx: OLLAMA_NUM_CTX
     },
     messages: [
       {
         role: 'system',
-        content: SYSTEM_PROMPT
+        content: systemPrompt
       },
       {
         role: 'user',
@@ -213,22 +250,80 @@ async function generateAnswer(text) {
     ]
   };
 
-  const response = await fetchWithTimeout(`${OLLAMA_BASE_URL}/api/chat`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
+  const startedAt = performance.now();
+  console.log(
+    `ollama request started requestId=${requestId} attempt=${attempt} model=${OLLAMA_MODEL} num_ctx=${OLLAMA_NUM_CTX} inputChars=${text.length}`
+  );
 
-  if (!response.ok) {
-    const details = await safeReadText(response);
-    throw createHttpError(502, `Ollama request failed${details ? `: ${details}` : '.'}`);
+  try {
+    const response = await fetchWithTimeout(`${OLLAMA_BASE_URL}/api/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const details = await safeReadText(response);
+      throw createHttpError(502, `Ollama request failed${details ? `: ${details}` : '.'}`);
+    }
+
+    const data = await response.json();
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    logOllamaUsage(data, elapsedMs, requestId, attempt);
+    const content = normalizeModelAnswer(data?.message?.content);
+    return content || 'Unable to determine';
+  } catch (error) {
+    console.log(
+      `ollama request failed requestId=${requestId} attempt=${attempt} elapsedMs=${Math.round(performance.now() - startedAt)} error=${error?.statusCode || error?.name || 'Error'}`
+    );
+    throw error;
   }
+}
 
-  const data = await response.json();
-  const content = normalizeModelAnswer(data?.message?.content);
-  return content || 'Unable to determine';
+function logOllamaUsage(data, elapsedMs, requestId, attempt) {
+  const promptTokens = finiteNumber(data?.prompt_eval_count);
+  const completionTokens = finiteNumber(data?.eval_count);
+  const contextTokens = promptTokens === null || completionTokens === null
+    ? null
+    : promptTokens + completionTokens;
+  const contextUsagePercent = contextTokens === null
+    ? null
+    : Math.round((contextTokens / OLLAMA_NUM_CTX) * 100);
+  const promptEvalMs = nanosecondsToMilliseconds(data?.prompt_eval_duration);
+  const evalMs = nanosecondsToMilliseconds(data?.eval_duration);
+  const generationTokensPerSecond = completionTokens !== null && evalMs > 0
+    ? Math.round((completionTokens / (evalMs / 1000)) * 10) / 10
+    : null;
+
+  console.log([
+    'ollama request finished',
+    `requestId=${requestId}`,
+    `attempt=${attempt}`,
+    `elapsedMs=${elapsedMs}`,
+    `num_ctx=${OLLAMA_NUM_CTX}`,
+    `promptTokens=${promptTokens ?? 'unknown'}`,
+    `completionTokens=${completionTokens ?? 'unknown'}`,
+    `contextTokens=${contextTokens ?? 'unknown'}`,
+    `contextUsagePercent=${contextUsagePercent ?? 'unknown'}`,
+    `promptEvalMs=${promptEvalMs ?? 'unknown'}`,
+    `evalMs=${evalMs ?? 'unknown'}`,
+    `generationTokensPerSecond=${generationTokensPerSecond ?? 'unknown'}`
+  ].join(' '));
+}
+
+function finiteNumber(value) {
+  return Number.isFinite(value) ? value : null;
+}
+
+function nanosecondsToMilliseconds(value) {
+  const nanoseconds = finiteNumber(value);
+  return nanoseconds === null ? null : Math.round(nanoseconds / 1_000_000);
+}
+
+function isUncertainAnswer(answer) {
+  return /\b(?:unable to determine|cannot determine|can't determine|not enough information|insufficient information|cannot be determined|unclear)\b/i.test(answer);
 }
 
 async function checkOllama() {

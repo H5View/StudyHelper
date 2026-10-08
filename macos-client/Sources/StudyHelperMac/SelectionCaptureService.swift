@@ -1,9 +1,15 @@
 import AppKit
 import ApplicationServices
+import Vision
+
+private let maxScreenTextLength = 16_000
+private let maxAccessibilityCaptureLength = 32_000
 
 enum SelectionCaptureError: Error {
     case accessibilityRequired
     case noTextSelected
+    case noReadableScreenText
+    case screenRecordingRequired
 }
 
 @MainActor
@@ -29,6 +35,221 @@ struct SelectionCaptureService {
         throw SelectionCaptureError.noTextSelected
     }
 
+    func focusedApplicationPID() -> pid_t? {
+        let systemWideElement = AXUIElementCreateSystemWide()
+        if let application = copyElementAttribute(kAXFocusedApplicationAttribute as CFString, from: systemWideElement) {
+            var pid: pid_t = 0
+            if AXUIElementGetPid(application, &pid) == .success, pid != 0 {
+                return pid
+            }
+        }
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
+    func captureReadableScreenText(from targetPID: pid_t?) throws -> String {
+        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
+            throw SelectionCaptureError.screenRecordingRequired
+        }
+
+        if let image = captureFrontmostWindow(of: targetPID), let text = recognizeText(in: image), !text.isEmpty {
+            debugLog("screenRead OCR characters=\(text.count) outputAtLimit=\(text.count >= maxScreenTextLength)")
+            return text
+        }
+
+        // Some apps expose their text to Accessibility even when the image has no OCR results.
+        guard isAccessibilityTrusted(prompt: true) else {
+            throw SelectionCaptureError.noReadableScreenText
+        }
+
+        let systemWideElement = AXUIElementCreateSystemWide()
+        guard let focusedApplication = copyElementAttribute(
+            kAXFocusedApplicationAttribute as CFString,
+            from: systemWideElement
+        ) else {
+            throw SelectionCaptureError.noReadableScreenText
+        }
+
+        let focusedElement = copyElementAttribute(
+            kAXFocusedUIElementAttribute as CFString,
+            from: systemWideElement
+        )
+        let focusedWindow = copyElementAttribute(
+            kAXFocusedWindowAttribute as CFString,
+            from: focusedApplication
+        )
+        let result = collectReadableText(from: [focusedElement, focusedWindow, focusedApplication].compactMap { $0 })
+        debugLog(
+            "screenRead inspected=\(result.inspectedElementCount) strings=\(result.stringCount) characters=\(result.text.count) sourceTruncated=\(result.sourceTruncated) outputTruncated=\(result.outputTruncated)"
+        )
+
+        guard !result.text.isEmpty else {
+            throw SelectionCaptureError.noReadableScreenText
+        }
+
+        return result.text
+    }
+
+    private func captureFrontmostWindow(of pid: pid_t?) -> CGImage? {
+        guard let pid,
+              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else {
+            return nil
+        }
+
+        for window in windows {
+            guard (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
+                  (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let windowID = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+            else {
+                continue
+            }
+
+            if let image = CGWindowListCreateImage(.null, .optionIncludingWindow, windowID, [.boundsIgnoreFraming]),
+               image.width > 100, image.height > 100 {
+                return image
+            }
+        }
+
+        return nil
+    }
+
+    private func recognizeText(in image: CGImage) -> String? {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+
+        do {
+            try VNImageRequestHandler(cgImage: image).perform([request])
+        } catch {
+            debugLog("screenRead OCR error=\(error)")
+            return nil
+        }
+
+        let lines = (request.results ?? [])
+            .sorted { left, right in
+                let verticalDifference = abs(left.boundingBox.midY - right.boundingBox.midY)
+                if verticalDifference < 0.015 {
+                    return left.boundingBox.minX < right.boundingBox.minX
+                }
+                return left.boundingBox.midY > right.boundingBox.midY
+            }
+            .compactMap { $0.topCandidates(1).first?.string }
+
+        let text = normalizeSelection(extractQuestionText(from: lines).joined(separator: "\n"))
+        return String(text.prefix(maxScreenTextLength))
+    }
+
+    private func extractQuestionText(from lines: [String]) -> [String] {
+        let normalizedLines = lines
+            .flatMap { $0.components(separatedBy: .newlines) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        // Browser tabs and document toolbars often contain unrelated question-like titles.
+        // In Google Docs, the editable page follows the document's menu bar.
+        let documentMenuIndex = normalizedLines.firstIndex {
+            $0.localizedCaseInsensitiveContains("File Edit View Insert Format")
+        }
+        let browserAddressIndex = normalizedLines.firstIndex {
+            $0.localizedCaseInsensitiveContains("docs.google.com/document/")
+        }
+        let contentStart = documentMenuIndex ?? browserAddressIndex
+        let content = contentStart.map { Array(normalizedLines.dropFirst($0 + 1)) } ?? normalizedLines
+        let choiceIndices = content.indices.filter { isAnswerChoiceLine(content[$0]) }
+
+        let questionIndices = content.indices.filter { index in
+            let line = content[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !isAnswerChoiceLine(line) else { return false }
+            let lowercased = line.lowercased()
+            let hasQuestionMark = line.contains("?") && line.filter(\.isLetter).count >= 3
+            let hasArithmetic = line.range(
+                of: #"\d\s*[+×÷*/−-]\s*\d"#,
+                options: .regularExpression
+            ) != nil
+            let numberedPrefix = lowercased.range(of: #"^\d+[.)]\s*"#, options: .regularExpression)
+            let questionStart = numberedPrefix.map { String(lowercased[$0.upperBound...]) } ?? lowercased
+            let startsWithQuestionWord = [
+                "what ", "which ", "why ", "how ", "when ", "where ", "who ",
+                "solve ", "calculate ", "compute ", "evaluate ", "determine ",
+                "identify ", "select ", "find ", "name "
+            ].contains { word in
+                questionStart.hasPrefix(word)
+            }
+            return hasArithmetic || hasQuestionMark || startsWithQuestionWord
+        }
+
+        guard !questionIndices.isEmpty else {
+            guard choiceIndices.count >= 2 else { return content }
+
+            var selectedIndices = Set<Int>()
+            for index in choiceIndices where index == 0 || !isAnswerChoiceLine(content[index - 1]) {
+                var previousIndex = index - 1
+                var contextLines = 0
+                while previousIndex >= 0 && contextLines < 3 && !isAnswerChoiceLine(content[previousIndex]) {
+                    selectedIndices.insert(previousIndex)
+                    previousIndex -= 1
+                    contextLines += 1
+                }
+
+                var nextIndex = index
+                var choiceCount = 0
+                while nextIndex < content.count && isAnswerChoiceLine(content[nextIndex]) && choiceCount < 8 {
+                    selectedIndices.insert(nextIndex)
+                    nextIndex += 1
+                    choiceCount += 1
+                }
+            }
+            return content.indices.filter { selectedIndices.contains($0) }.map { content[$0] }
+        }
+
+        var selectedIndices = Set<Int>()
+        for index in questionIndices {
+            let precedingQuestion = questionIndices.last(where: { $0 < index }) ?? -1
+            let precedingChoice = choiceIndices.last(where: { $0 < index }) ?? -1
+            var previousIndex = index - 1
+            var contextLines = 0
+            while previousIndex > max(precedingQuestion, precedingChoice) && contextLines < 2 {
+                selectedIndices.insert(previousIndex)
+                previousIndex -= 1
+                contextLines += 1
+            }
+
+            selectedIndices.insert(index)
+            var nextIndex = index + 1
+            let questionLine = content[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            let questionIsComplete = questionLine.contains("?") || questionLine.hasSuffix("=")
+            var continuationCount = 0
+
+            while nextIndex < content.count && !questionIndices.contains(nextIndex) {
+                if isAnswerChoiceLine(content[nextIndex]) {
+                    var choiceCount = 0
+                    while nextIndex < content.count && isAnswerChoiceLine(content[nextIndex]) && choiceCount < 8 {
+                        selectedIndices.insert(nextIndex)
+                        nextIndex += 1
+                        choiceCount += 1
+                    }
+                    break
+                }
+
+                guard !questionIsComplete && continuationCount < 4 else { break }
+                selectedIndices.insert(nextIndex)
+                nextIndex += 1
+                continuationCount += 1
+                let continuation = content[nextIndex - 1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if continuation.contains("?") || continuation.hasSuffix("=") { break }
+            }
+        }
+
+        return content.indices.filter { selectedIndices.contains($0) }.map { content[$0] }
+    }
+
+    private func isAnswerChoiceLine(_ line: String) -> Bool {
+        line.range(
+            of: #"^\s*(?:\([A-Ha-h]\)|[A-Ha-h][.)]|[A-Ha-h]\s*[-:])\s+\S"#,
+            options: .regularExpression
+        ) != nil
+    }
+
     private func copySelectedTextUsingAccessibility() -> String? {
         let systemWideElement = AXUIElementCreateSystemWide()
 
@@ -44,6 +265,55 @@ struct SelectionCaptureService {
         }
 
         return nil
+    }
+
+    private func collectReadableText(from rootElements: [AXUIElement]) -> ScreenReadResult {
+        var queue = rootElements.map { (element: $0, depth: 0) }
+        var strings: [String] = []
+        var uniqueStrings = Set<String>()
+        var inspectedElementCount = 0
+        var characterCount = 0
+
+        while !queue.isEmpty && inspectedElementCount < 1_500 && characterCount < maxAccessibilityCaptureLength {
+            let next = queue.removeFirst()
+            inspectedElementCount += 1
+
+            for attribute in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
+                guard let value = copyAttribute(attribute as CFString, from: next.element) as? String else {
+                    continue
+                }
+
+                let normalized = normalizeSelection(value)
+                if !normalized.isEmpty && uniqueStrings.insert(normalized).inserted {
+                    strings.append(normalized)
+                    characterCount += normalized.count + 1
+                }
+            }
+
+            guard next.depth < 18 else { continue }
+            let children = copyVisibleChildren(from: next.element)
+            queue.append(contentsOf: children.map { (element: $0, depth: next.depth + 1) })
+        }
+
+        let rawText = strings.joined(separator: "\n")
+        let extractedText = normalizeSelection(
+            extractQuestionText(from: rawText.components(separatedBy: .newlines)).joined(separator: "\n")
+        )
+        return ScreenReadResult(
+            text: String(extractedText.prefix(maxScreenTextLength)),
+            inspectedElementCount: inspectedElementCount,
+            stringCount: strings.count,
+            sourceTruncated: !queue.isEmpty && (inspectedElementCount >= 1_500 || characterCount >= maxAccessibilityCaptureLength),
+            outputTruncated: extractedText.count > maxScreenTextLength
+        )
+    }
+
+    private func copyVisibleChildren(from element: AXUIElement) -> [AXUIElement] {
+        if let children = copyAttribute(kAXVisibleChildrenAttribute as CFString, from: element) as? [AXUIElement], !children.isEmpty {
+            return children
+        }
+
+        return copyAttribute(kAXChildrenAttribute as CFString, from: element) as? [AXUIElement] ?? []
     }
 
     private func copySelectedTextViaClipboardFallback() async throws -> String? {
@@ -109,6 +379,20 @@ struct SelectionCaptureService {
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    private func debugLog(_ message: String) {
+#if DEBUG
+        print("[StudyHelper DEBUG] \(message)")
+#endif
+    }
+}
+
+private struct ScreenReadResult {
+    let text: String
+    let inspectedElementCount: Int
+    let stringCount: Int
+    let sourceTruncated: Bool
+    let outputTruncated: Bool
 }
 
 private struct PasteboardSnapshot {
