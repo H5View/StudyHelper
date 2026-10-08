@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   detectQuestionType,
   extractFillInAnswer,
+  formatFillInAnswer,
   getThinkingDecision,
   isUncertainAnswer,
   matchAnswerToChoices,
@@ -64,10 +65,14 @@ test('fill-in formatting extracts only reliable blank spans at the beginning, mi
   );
   assert.equal(
     extractFillInAnswer(
-      'Photosynthesis is the process by which plants convert sunlight into chemical energy.',
-      '____ is the process by which plants convert sunlight into chemical energy.'
+      'mitosis is the process of cell division.',
+      '____ is the process of cell division.'
     ),
-    'Photosynthesis'
+    'mitosis'
+  );
+  assert.equal(
+    extractFillInAnswer('The nucleus contains genetic information.', 'The ____ contains genetic information.'),
+    'nucleus'
   );
   assert.equal(
     extractFillInAnswer('Plants convert sunlight into chemical energy.', 'Plants convert sunlight into ____ energy.'),
@@ -85,6 +90,11 @@ test('fill-in formatting extracts only reliable blank spans at the beginning, mi
     'mitochondrion'
   );
   assert.equal(
+    extractFillInAnswer('mitochondrion', 'The powerhouse of the cell is the ____.'),
+    'mitochondrion',
+    'a direct missing-word response is preserved unchanged'
+  );
+  assert.equal(
     extractFillInAnswer('The answer is: “deoxyribonucleic acid”', 'DNA stands for ____.'),
     'deoxyribonucleic acid'
   );
@@ -93,6 +103,37 @@ test('fill-in formatting extracts only reliable blank spans at the beginning, mi
     extractFillInAnswer(unrelatedAnswer, 'The powerhouse of the cell is the ____.'),
     unrelatedAnswer,
     'formatter changed an answer when the missing span could not be identified'
+  );
+  const echoedPrefix = formatFillInAnswer(
+    'The powerhouse of the cell is the',
+    'The powerhouse of the cell is the _____. '
+  );
+  assert.deepEqual(echoedPrefix, { answer: '', reliable: false, extracted: false });
+  assert.equal(
+    formatFillInAnswer(
+      'Plants convert sunlight into chemical',
+      'Plants convert sunlight into ____ energy.'
+    ).reliable,
+    false,
+    'a truncated completed sentence with the original prefix is not accepted as a direct answer'
+  );
+  assert.equal(
+    formatFillInAnswer(
+      'The powerhouse of the cell is mitochondrion.',
+      'The powerhouse of the cell is the _____. '
+    ).reliable,
+    false,
+    'a sentence that mostly echoes the question prefix is retried if exact extraction fails'
+  );
+  assert.equal(
+    extractFillInAnswer('The powerhouse of the cell is the', 'The powerhouse of the cell is the _____.'),
+    'Unable to determine',
+    'a prefix-only model response is never returned as the answer'
+  );
+  assert.equal(
+    formatFillInAnswer('The powerhouse of the cell is the _____.', 'The powerhouse of the cell is the _____.').reliable,
+    false,
+    'an echoed unfilled blank is never extracted as the answer'
   );
 });
 

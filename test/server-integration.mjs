@@ -8,6 +8,7 @@ import { dirname, resolve } from 'node:path';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 const calls = [];
+const rawModelResponses = [];
 
 const ollama = createServer(async (request, response) => {
   if (request.url === '/api/tags') {
@@ -22,18 +23,28 @@ const ollama = createServer(async (request, response) => {
   const question = payload.messages.at(-1).content;
   const uncertainRetryCase = question.includes('RETRY_CASE');
   const retryNumber = calls.filter((call) => call.messages.at(-1).content.includes('RETRY_CASE')).length;
+  const powerhouseRequestCount = calls.filter((call) => call.messages.at(-1).content === question).length;
   const answer = uncertainRetryCase && retryNumber === 2 ? 'D) stomata' :
     uncertainRetryCase ? 'Ask Google' :
       question.includes('NO_RETRY_FILL') ? 'Unable to determine' :
       question.includes('Option 4: stomata') ? 'stomata' :
-        question.includes('powerhouse of the cell') ? 'The powerhouse of the cell is the mitochondrion. It produces most cellular ATP.' :
+        question.includes('powerhouse of the cell')
+          ? powerhouseRequestCount === 1 ? 'The powerhouse of the cell is the' : 'mitochondrion' :
           question.includes('DNA stands for') ? 'DNA stands for deoxyribonucleic acid.' :
-            question.startsWith('____ is the process') ? 'Photosynthesis is the process by which plants convert sunlight into chemical energy.' :
+            question.startsWith('____ is the process of cell division') ? 'mitosis is the process of cell division.' :
+              question.startsWith('____ is the process') ? 'Photosynthesis is the process by which plants convert sunlight into chemical energy.' :
+                question.includes('contains genetic information') ? 'The nucleus contains genetic information.' :
               question.includes('Plants convert sunlight into ____ energy') ? 'Plants convert sunlight into chemical energy.' :
                 question.includes('two main products of photosynthesis') ? 'The two main products of photosynthesis are glucose and oxygen.' :
                   question.includes('convert sunlight into chemical energy') ? 'The process by which plants convert sunlight into chemical energy is photosynthesis.' :
               question.includes('What is osmosis?') ? 'Osmosis is the movement of water across a selectively permeable membrane.' :
                 'D — stomata. Stomata allow carbon dioxide to enter the leaf.';
+  rawModelResponses.push({
+    question,
+    answer,
+    think: payload.think,
+    systemPrompt: payload.messages[0].content
+  });
 
   response.writeHead(200, { 'content-type': 'application/x-ndjson' });
   response.write(`${JSON.stringify({ message: { thinking: 'PRIVATE_TRACE: ask Google, unclear' }, done: false })}\n`);
@@ -117,6 +128,8 @@ try {
   const fillIns = [
     ['The powerhouse of the cell is the _____.', 'mitochondrion'],
     ['DNA stands for ____.', 'deoxyribonucleic acid'],
+    ['____ is the process of cell division.', 'mitosis'],
+    ['The ____ contains genetic information.', 'nucleus'],
     ['The process by which plants convert sunlight into chemical energy is ____.', 'photosynthesis'],
     ['____ is the process by which plants convert sunlight into chemical energy.', 'Photosynthesis'],
     ['Plants convert sunlight into ____ energy.', 'chemical'],
@@ -131,17 +144,40 @@ try {
       expectedAnswer,
       'stream exposed the model completed sentence instead of only the missing span'
     );
-    assert.equal(calls.length, before + 1, 'fill-in-the-blank question triggered an automatic retry');
+    const neededRetry = question.includes('powerhouse of the cell');
+    const expectedRequestCount = neededRetry ? 2 : 1;
+    assert.equal(calls.length, before + expectedRequestCount, 'only an unreliable fill-in response should trigger one retry');
+    const initialPayload = calls[before];
+    assert.equal(initialPayload.think, false, 'straightforward fill-in-the-blank enabled thinking');
+    assert.equal(initialPayload.options.num_predict, 96);
+    assert.equal(initialPayload.options.num_ctx, 8192);
+    assert.match(initialPayload.messages[0].content, /This is a fill-in-the-blank question/);
+    assert.match(initialPayload.messages[0].content, /Do not choose an answer letter/);
+    assert.match(initialPayload.messages[0].content, /Return only the missing word or phrase/);
+    assert.match(initialPayload.messages[0].content, /never repeat the question or return the completed sentence/);
+    assert.match(initialPayload.messages[0].content, /Do not include an explanation, introduction, quotation marks, or labels/);
+    if (neededRetry) {
+      assert.equal(rawModelResponses[before].answer, 'The powerhouse of the cell is the', 'test must compare the raw Ollama final response');
+      const retryPayload = calls[before + 1];
+      assert.equal(retryPayload.think, false, 'fill-in extraction retry must disable thinking');
+      assert.match(retryPayload.messages[0].content, /Return ONLY the missing word or shortest correct phrase/);
+      assert.match(retryPayload.messages[0].content, /Do not repeat any part of the question/);
+      assert.equal(rawModelResponses[before + 1].answer, 'mitochondrion');
+    }
     const payload = calls.at(-1);
     assert.equal(payload.think, false, 'straightforward fill-in-the-blank enabled thinking');
     assert.equal(payload.options.num_predict, 96);
     assert.equal(payload.options.num_ctx, 8192);
-    assert.match(payload.messages[0].content, /This is a fill-in-the-blank question/);
-    assert.match(payload.messages[0].content, /Do not choose an answer letter/);
-    assert.match(payload.messages[0].content, /Return only the missing word or phrase/);
-    assert.match(payload.messages[0].content, /never repeat the question or return the completed sentence/);
-    assert.match(payload.messages[0].content, /Do not include an explanation, introduction, quotation marks, or labels/);
   }
+
+  assert.deepEqual(
+    fillIns.map(([, expectedAnswer]) => expectedAnswer),
+    ['mitochondrion', 'deoxyribonucleic acid', 'mitosis', 'nucleus', 'photosynthesis', 'Photosynthesis', 'chemical', 'glucose; oxygen']
+  );
+
+  const jsonFillAnswer = await postJson(bridgePort, 'DNA stands for ____.');
+  assert.equal(rawModelResponses.at(-1).answer, 'DNA stands for deoxyribonucleic acid.');
+  assert.equal(jsonFillAnswer.answer, 'deoxyribonucleic acid', 'JSON endpoint did not return the missing term alone');
 
   const noRetryQuestion = 'NO_RETRY_FILL\nFill in the blank: A plant cell wall is primarily made of ____.';
   const callsBeforeNoRetry = calls.length;
@@ -159,10 +195,10 @@ try {
   const retryQuestion = `RETRY_CASE\nExplain why plants need stomata.\nA) trichomes\nB) internodes\nC) stipules\nD) stomata`;
   const retried = await postStream(bridgePort, retryQuestion);
   assert.equal(retried.answer, 'D — stomata');
-  assert.equal(calls.length, 12, 'uncertain multiple-choice answer should receive exactly one retry');
-  assert.equal(calls[10].think, true, 'complex initial request should permit thinking');
-  assert.equal(calls[11].think, false, 'short retry should disable thinking');
-  assert.equal(calls[11].options.num_predict, 96, 'retry must respect the configured output token limit');
+  assert.equal(calls.length, 16, 'uncertain multiple-choice answer should receive exactly one retry');
+  assert.equal(calls[14].think, true, 'complex initial request should permit thinking');
+  assert.equal(calls[15].think, false, 'short retry should disable thinking');
+  assert.equal(calls[15].options.num_predict, 96, 'retry must respect the configured output token limit');
 
   assert.match(logs, /questionType=multiple-choice .*think=false thinkReason=straightforward-multiple-choice detectedChoices=4/);
   assert.match(logs, /questionType=fill-in-the-blank .*think=false thinkReason=straightforward-fill-in-the-blank detectedChoices=0/);
@@ -189,6 +225,16 @@ async function postStream(port, text) {
     if (line.trim()) events.push(JSON.parse(line));
   }
   return { events, answer: events.findLast((event) => event.type === 'done')?.answer };
+}
+
+async function postJson(port, text) {
+  const response = await fetch(`http://127.0.0.1:${port}/study-answer`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-study-assistant-token': 'integration-test-token' },
+    body: JSON.stringify({ text, outputMode: 'mac' })
+  });
+  assert.equal(response.status, 200);
+  return response.json();
 }
 
 async function waitForBridge(port) {

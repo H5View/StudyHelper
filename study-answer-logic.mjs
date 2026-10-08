@@ -65,10 +65,15 @@ export function detectQuestionType(text) {
 }
 
 export function extractFillInAnswer(modelOutput, questionText) {
-  let output = cleanFillAnswer(modelOutput);
-  if (!output) return output;
+  const formatted = formatFillInAnswer(modelOutput, questionText);
+  return formatted.answer || 'Unable to determine';
+}
 
-  const question = String(questionText ?? '').trim();
+export function formatFillInAnswer(modelOutput, questionText) {
+  const output = cleanFillAnswer(modelOutput);
+  if (!output) return { answer: '', reliable: false, extracted: false };
+
+  const question = stripFillInInstruction(String(questionText ?? '').trim());
   const parts = question.split(BLANK_MARKER);
   if (parts.length > 1) {
     const anchors = parts.map((part) => part.trim());
@@ -89,8 +94,8 @@ export function extractFillInAnswer(modelOutput, questionText) {
         const match = output.match(new RegExp(pattern, 'i'));
         if (match) {
           const missingParts = match.slice(1).map((part) => cleanExtractedPhrase(part));
-          if (missingParts.every((part) => part && part.length <= 180)) {
-            return missingParts.join('; ');
+          if (missingParts.every((part) => part && part.length <= 180 && !containsUnfilledBlank(part))) {
+            return { answer: missingParts.join('; '), reliable: true, extracted: true };
           }
         }
       } catch {}
@@ -100,10 +105,17 @@ export function extractFillInAnswer(modelOutput, questionText) {
   const stem = getIncompleteFillStem(question);
   if (stem && stem.length >= 8 && output.toLocaleLowerCase().startsWith(stem.toLocaleLowerCase())) {
     const missing = cleanExtractedPhrase(output.slice(stem.length));
-    if (missing && missing.length <= 180) return missing;
+    if (missing && missing.length <= 180 && !containsUnfilledBlank(missing)) {
+      return { answer: missing, reliable: true, extracted: true };
+    }
+    return { answer: '', reliable: false, extracted: false };
   }
 
-  return output;
+  if (isIncompleteQuestionEcho(output, question, parts)) {
+    return { answer: '', reliable: false, extracted: false };
+  }
+
+  return { answer: output, reliable: true, extracted: false };
 }
 
 export function getThinkingDecision(text, mode = 'auto') {
@@ -261,6 +273,7 @@ function normalizeForMatch(value) {
 function cleanFillAnswer(value) {
   let answer = String(value ?? '').trim();
   answer = answer.replace(/^```(?:[\w+-]+)?\s*|\s*```$/g, '').trim();
+  answer = stripFillInInstruction(answer);
   answer = answer.replace(
     /^(?:(?:the\s+)?answer|(?:the\s+)?missing\s+(?:word|term|phrase)|(?:the\s+)?completed\s+sentence)\s*(?::\s*|[-—–]\s*|\bis\b\s*:?\s*)/i,
     ''
@@ -279,6 +292,17 @@ function cleanExtractedPhrase(value) {
   return phrase;
 }
 
+function containsUnfilledBlank(value) {
+  return /(?:\\?_+|\.{3,}|…+|\[\s*blank\s*\]|\(\s*blank\s*\))/i.test(value);
+}
+
+function stripFillInInstruction(question) {
+  return question.replace(
+    /^\s*(?:(?:please\s+)?fill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank|complete\s+(?:the\s+)?(?:blank|sentence|statement)|missing\s+(?:word|term|phrase))\s*:?\s*/i,
+    ''
+  ).trim();
+}
+
 function flexibleAnchorPattern(anchor) {
   return anchor.split(/\s+/).filter(Boolean).map(escapeRegExp).join('\\s+');
 }
@@ -288,9 +312,42 @@ function escapeRegExp(value) {
 }
 
 function getIncompleteFillStem(question) {
-  return String(question ?? '')
-    .replace(/^\s*(?:fill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\s*:?|complete\s+(?:the\s+)?(?:blank|sentence|statement)\s*:?|missing\s+(?:word|term|phrase)\s*:?)/i, '')
-    .trim()
-    .replace(/[.!?\s]+$/g, '')
-    .trim();
+  const text = stripFillInInstruction(String(question ?? '').trim());
+  const markerAtEnd = /(?:\\?_+|\.{3,}|…+|\[\s*(?:blank|\s{2,})\s*\]|\(\s*(?:blank|\s{2,})\s*\))\s*[.!?]*\s*$/i;
+  const trailingBlank = text.match(markerAtEnd);
+  const stem = trailingBlank ? text.slice(0, trailingBlank.index) : text;
+  return stem.replace(/[.!?\s]+$/g, '').trim();
+}
+
+function isIncompleteQuestionEcho(output, question, parts) {
+  const normalizedOutput = normalizeForMatch(output);
+  if (!normalizedOutput) return false;
+
+  const prefix = normalizeForMatch(parts[0] ?? '');
+  const suffix = normalizeForMatch(parts.at(-1) ?? '');
+  if (prefix && normalizedOutput.startsWith(prefix)) return true;
+  if (suffix && normalizedOutput.endsWith(suffix)) return true;
+  if (sharesQuestionAnchor(normalizedOutput, prefix, 'start')) return true;
+  if (sharesQuestionAnchor(normalizedOutput, suffix, 'end')) return true;
+
+  const stem = normalizeForMatch(getIncompleteFillStem(question));
+  return Boolean(stem && normalizedOutput === stem);
+}
+
+function sharesQuestionAnchor(output, anchor, edge) {
+  const outputWords = output.split(/\s+/).filter(Boolean);
+  const anchorWords = anchor.split(/\s+/).filter(Boolean);
+  if (anchorWords.length < 4 || outputWords.length < 4) return false;
+
+  let matched = 0;
+  while (
+    matched < anchorWords.length
+    && matched < outputWords.length
+    && anchorWords[edge === 'start' ? matched : anchorWords.length - matched - 1]
+      === outputWords[edge === 'start' ? matched : outputWords.length - matched - 1]
+  ) {
+    matched += 1;
+  }
+
+  return matched >= 4 && matched / anchorWords.length >= 0.75;
 }

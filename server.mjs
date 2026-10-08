@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
-import { extractFillInAnswer, getThinkingDecision, matchAnswerToChoices, redactInputForDebug, resolveAnswer } from './study-answer-logic.mjs';
+import { formatFillInAnswer, getThinkingDecision, matchAnswerToChoices, redactInputForDebug, resolveAnswer } from './study-answer-logic.mjs';
 import { readOllamaEventStream } from './ollama-stream.mjs';
 
 const env = loadEnvFile();
@@ -259,7 +259,7 @@ async function generateAnswer(text, handlers = {}) {
   try {
     attempts += 1;
     const onModelContent = questionType === 'fill-in-the-blank' ? undefined : handlers.onContent;
-    const firstAnswer = await requestModel(
+    let firstAnswer = await requestModel(
       text,
       buildSystemPrompt(questionType, text),
       requestId,
@@ -269,10 +269,24 @@ async function generateAnswer(text, handlers = {}) {
       OLLAMA_NUM_PREDICT
     );
     if (questionType === 'fill-in-the-blank') {
-      const formattedAnswer = extractFillInAnswer(firstAnswer, text);
-      if (formattedAnswer !== firstAnswer) {
-        console.log(`study-answer fill formatted requestId=${requestId} normalized=true`);
+      let formatted = formatFillInAnswer(firstAnswer, text);
+      if (!formatted.reliable) {
+        console.log(`study-answer fill retrying requestId=${requestId} reason=unreliable-extraction`);
+        handlers.onRetry?.();
+        attempts += 1;
+        firstAnswer = await requestModel(
+          text,
+          buildFillInRetryPrompt(),
+          requestId,
+          'fill-in-retry',
+          false,
+          undefined,
+          OLLAMA_NUM_PREDICT
+        );
+        formatted = formatFillInAnswer(firstAnswer, text);
       }
+      const formattedAnswer = formatted.reliable && formatted.answer ? formatted.answer : 'Unable to determine';
+      console.log(`study-answer fill formatted requestId=${requestId} extracted=${formatted.extracted} reliable=${formatted.reliable}`);
       // Hold raw generated text back until the completed-sentence fallback has
       // been reduced to the missing span, so neither UI can flash the question.
       handlers.onContent?.(formattedAnswer, formattedAnswer, 'formatted');
@@ -347,6 +361,15 @@ function buildSystemPrompt(questionType, text) {
     ...shared,
     'This is a short-answer question. Give a concise, direct answer without requiring or inventing answer choices.',
     'Use one short sentence unless the question explicitly requests an explanation or more detail.'
+  ].join(' ');
+}
+
+function buildFillInRetryPrompt() {
+  return [
+    'This is a fill-in-the-blank question.',
+    'Return ONLY the missing word or shortest correct phrase.',
+    'Do not repeat any part of the question, do not complete the sentence, and do not explain.',
+    'If the answer is uncertain, give your best supported missing term or phrase.'
   ].join(' ');
 }
 
