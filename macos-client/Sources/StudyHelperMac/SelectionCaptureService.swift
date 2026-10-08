@@ -135,8 +135,12 @@ struct SelectionCaptureService {
             }
             .compactMap { $0.topCandidates(1).first?.string }
 
-        let text = normalizeSelection(extractQuestionText(from: lines).joined(separator: "\n"))
-        return String(text.prefix(maxScreenTextLength))
+        let extractedText = normalizeSelection(extractQuestionText(from: lines).joined(separator: "\n"))
+        let text = String(extractedText.prefix(maxScreenTextLength))
+        debugLog(
+            "screenRead OCR extractedCharacters=\(extractedText.count) sentCharacters=\(text.count) outputTruncated=\(extractedText.count > maxScreenTextLength)"
+        )
+        return text
     }
 
     private func extractQuestionText(from lines: [String]) -> [String] {
@@ -191,13 +195,12 @@ struct SelectionCaptureService {
                     contextLines += 1
                 }
 
-                var nextIndex = index
-                var choiceCount = 0
-                while nextIndex < content.count && isAnswerChoiceLine(content[nextIndex]) && choiceCount < 8 {
-                    selectedIndices.insert(nextIndex)
-                    nextIndex += 1
-                    choiceCount += 1
-                }
+                _ = addAnswerChoiceGroup(
+                    startingAt: index,
+                    in: content,
+                    questionIndices: [],
+                    selectedIndices: &selectedIndices
+                )
             }
             return content.indices.filter { selectedIndices.contains($0) }.map { content[$0] }
         }
@@ -222,12 +225,12 @@ struct SelectionCaptureService {
 
             while nextIndex < content.count && !questionIndices.contains(nextIndex) {
                 if isAnswerChoiceLine(content[nextIndex]) {
-                    var choiceCount = 0
-                    while nextIndex < content.count && isAnswerChoiceLine(content[nextIndex]) && choiceCount < 8 {
-                        selectedIndices.insert(nextIndex)
-                        nextIndex += 1
-                        choiceCount += 1
-                    }
+                    _ = addAnswerChoiceGroup(
+                        startingAt: nextIndex,
+                        in: content,
+                        questionIndices: questionIndices,
+                        selectedIndices: &selectedIndices
+                    )
                     break
                 }
 
@@ -245,9 +248,51 @@ struct SelectionCaptureService {
 
     private func isAnswerChoiceLine(_ line: String) -> Bool {
         line.range(
-            of: #"^\s*(?:\([A-Ha-h]\)|[A-Ha-h][.)]|[A-Ha-h]\s*[-:])\s+\S"#,
+            of: #"^\s*(?:\([A-Za-z]\)|[A-Za-z][.)]|[A-Za-z]\s*[-:])\s*\S"#,
             options: .regularExpression
         ) != nil
+    }
+
+    @discardableResult
+    private func addAnswerChoiceGroup(
+        startingAt startIndex: Int,
+        in content: [String],
+        questionIndices: [Int],
+        selectedIndices: inout Set<Int>
+    ) -> Int {
+        var nextIndex = startIndex
+        var choiceCount = 0
+
+        while nextIndex < content.count && isAnswerChoiceLine(content[nextIndex]) && choiceCount < 26 {
+            selectedIndices.insert(nextIndex)
+            nextIndex += 1
+            choiceCount += 1
+
+            var continuationCount = 0
+            while nextIndex < content.count
+                && !isAnswerChoiceLine(content[nextIndex])
+                && !questionIndices.contains(nextIndex)
+                && continuationCount < 3 {
+                let continuation = content[nextIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                let previousChoiceText = content[nextIndex - 1].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard isLikelyChoiceContinuation(continuation, following: previousChoiceText) else { break }
+                selectedIndices.insert(nextIndex)
+                nextIndex += 1
+                continuationCount += 1
+            }
+        }
+
+        return choiceCount
+    }
+
+    private func isLikelyChoiceContinuation(_ line: String, following previousLine: String) -> Bool {
+        guard let firstCharacter = line.first else { return false }
+        let beginsLikeContinuation = firstCharacter.isLowercase || ",;:)–-".contains(firstCharacter)
+        let previousEndsMidThought = previousLine.range(
+            of: #"\b(?:and|or|of|to|in|on|for|with|by|from|that|which|a|an|the|because|as|is|are|was|were|into|through|between|than|more|less|,|[-–])$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        return beginsLikeContinuation || previousEndsMidThought
     }
 
     private func copySelectedTextUsingAccessibility() -> String? {

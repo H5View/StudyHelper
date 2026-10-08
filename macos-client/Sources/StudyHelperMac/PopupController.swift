@@ -18,6 +18,13 @@ final class PopupController {
         showPanel()
     }
 
+    func showStreamingMessage(_ message: String) {
+        dismissTask?.cancel()
+        viewModel.message = message
+        viewModel.isLoading = false
+        showPanel()
+    }
+
     func showMessage(_ message: String, autoDismissAfter duration: TimeInterval) {
         dismissTask?.cancel()
         viewModel.message = message

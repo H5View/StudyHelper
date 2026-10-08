@@ -21,6 +21,8 @@ swift run StudyHelperMac
 - URL: `http://192.168.86.51:8788`
 - Token: `change-me`
 
+The Windows bridge selects the Ollama model through its `OLLAMA_MODEL` setting. The Mac client shows the active model returned by `GET /health`; it has no separate model selection setting.
+
 ## Permissions
 
 Accessibility is required for selected-text capture and the clipboard fallback. Read Screen needs Screen Recording permission so macOS can capture the frontmost window for text recognition.
@@ -55,6 +57,8 @@ The selected mode is saved with `UserDefaults` and survives app restarts.
 
 - `Selected Text`: the default. It keeps the existing highlighted-text retrieval and clipboard-preserving fallback.
 - `Read Screen`: captures the frontmost app window in memory, recognizes its visible text, and sends likely question lines with their answer choices. OCR and Accessibility text use the same question extraction. It falls back to Accessibility text when recognition finds nothing. It does not save a screenshot. Screen text is capped at 16,000 characters after extraction.
+
+Study answers stream into the existing Mac popup as the model produces answer text. Thinking traces are not shown. The Mac client falls back to the JSON answer endpoint when connected to an older bridge that does not support streaming.
 
 If Screen Recording access is missing, StudyHelper displays `Screen Recording required`. If the frontmost window contains no recognizable text, it displays `No readable screen text`. The selected input mode is saved with `UserDefaults` and survives app restarts.
 

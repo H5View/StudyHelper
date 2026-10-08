@@ -10,6 +10,14 @@ private struct StudyAnswerResponse: Decodable {
     let answer: String
 }
 
+private struct StudyAnswerStreamEvent: Decodable {
+    let type: String
+    let content: String?
+    let answer: String?
+    let message: String?
+    let error: String?
+}
+
 private struct StudyAnswerRequest: Encodable {
     let text: String
     let outputMode: String
@@ -57,7 +65,12 @@ struct BridgeClient {
         return try JSONDecoder().decode(HealthStatus.self, from: data)
     }
 
-    func fetchStudyAnswer(for rawText: String, outputMode: AnswerDisplayMode) async throws -> String {
+    func fetchStudyAnswer(
+        for rawText: String,
+        outputMode: AnswerDisplayMode,
+        onPartialAnswer: @escaping @MainActor (String) -> Void,
+        onStatus: @escaping @MainActor (String) -> Void
+    ) async throws -> String {
         let text = normalizeSelection(rawText)
         guard !text.isEmpty else {
             throw BridgeClientError.requestFailed
@@ -67,6 +80,97 @@ struct BridgeClient {
             throw BridgeClientError.requestFailed
         }
 
+        let url = configuration.bridgeBaseURL
+            .appendingPathComponent("study-answer")
+            .appendingPathComponent("stream")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = configuration.studyAnswerRequestTimeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(configuration.studyToken, forHTTPHeaderField: "X-Study-Assistant-Token")
+        request.httpBody = try JSONEncoder().encode(StudyAnswerRequest(text: text, outputMode: outputMode.rawValue))
+
+        debugLog("study-answer stream started chars=\(text.count) timeout=\(Int(configuration.studyAnswerRequestTimeout))s mode=\(outputMode.rawValue)")
+        let startedAt = ContinuousClock.now
+
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await session.bytes(for: request)
+        } catch {
+            debugLog("study-answer stream networkingError=\(String(describing: error))")
+            if Task.isCancelled { throw CancellationError() }
+            throw mapTransportError(error, kind: .studyAnswer)
+        }
+
+        let httpResponse = try requireHTTPResponse(response)
+        debugLog("study-answer stream status=\(httpResponse.statusCode)")
+        guard (200...299).contains(httpResponse.statusCode) else {
+            var data = Data()
+            do {
+                for try await byte in bytes {
+                    data.append(byte)
+                }
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                throw mapTransportError(error, kind: .studyAnswer)
+            }
+
+            if httpResponse.statusCode == 404 {
+                debugLog("study-answer stream unavailable; falling back to JSON endpoint")
+                return try await fetchStudyAnswerJSON(text, outputMode: outputMode)
+            }
+            throw mapBridgeError(statusCode: httpResponse.statusCode, data: data)
+        }
+
+        var accumulatedAnswer = ""
+        var finalAnswer: String?
+        var timeToFirstContentMs: Int?
+
+        do {
+            for try await line in bytes.lines {
+                guard let lineData = line.data(using: .utf8) else { continue }
+                let event = try JSONDecoder().decode(StudyAnswerStreamEvent.self, from: lineData)
+
+                switch event.type {
+                case "delta":
+                    guard let content = event.content, !content.isEmpty else { continue }
+                    accumulatedAnswer += content
+                    if timeToFirstContentMs == nil {
+                        timeToFirstContentMs = elapsedMilliseconds(startedAt.duration(to: .now))
+                        debugLog("study-answer firstContentMs=\(timeToFirstContentMs!)")
+                    }
+                    await onPartialAnswer(accumulatedAnswer)
+                case "reset":
+                    accumulatedAnswer = ""
+                    await onPartialAnswer("")
+                case "status":
+                    await onStatus(event.message ?? "Working…")
+                case "done":
+                    finalAnswer = event.answer?.trimmingCharacters(in: .whitespacesAndNewlines) ?? accumulatedAnswer
+                case "error":
+                    throw BridgeClientError.modelUnavailable
+                default:
+                    continue
+                }
+            }
+        } catch let error as BridgeClientError {
+            throw error
+        } catch {
+            debugLog("study-answer stream parseError=\(String(describing: error))")
+            if Task.isCancelled { throw CancellationError() }
+            throw BridgeClientError.requestFailed
+        }
+
+        let elapsed = elapsedMilliseconds(startedAt.duration(to: .now))
+        debugLog("study-answer stream elapsedMs=\(elapsed) firstContentMs=\(timeToFirstContentMs.map(String.init) ?? "unknown")")
+        guard let finalAnswer, !finalAnswer.isEmpty else {
+            throw BridgeClientError.requestFailed
+        }
+        return finalAnswer
+    }
+
+    private func fetchStudyAnswerJSON(_ text: String, outputMode: AnswerDisplayMode) async throws -> String {
         let url = configuration.bridgeBaseURL.appending(path: "study-answer")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -75,16 +179,11 @@ struct BridgeClient {
         request.setValue(configuration.studyToken, forHTTPHeaderField: "X-Study-Assistant-Token")
         request.httpBody = try JSONEncoder().encode(StudyAnswerRequest(text: text, outputMode: outputMode.rawValue))
 
-        debugLog("study-answer request started chars=\(text.count) timeout=\(Int(configuration.studyAnswerRequestTimeout))s mode=\(outputMode.rawValue)")
-
         let (data, response) = try await perform(request, kind: .studyAnswer)
         let httpResponse = try requireHTTPResponse(response)
-        debugLog("study-answer response status=\(httpResponse.statusCode)")
-
         guard (200...299).contains(httpResponse.statusCode) else {
             throw mapBridgeError(statusCode: httpResponse.statusCode, data: data)
         }
-
         let decoded = try JSONDecoder().decode(StudyAnswerResponse.self, from: data)
         return decoded.answer.trimmingCharacters(in: .whitespacesAndNewlines)
     }

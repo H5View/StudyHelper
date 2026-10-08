@@ -8,10 +8,12 @@ const HOST = env.STUDY_ASSISTANT_HOST || '0.0.0.0';
 const PORT = parsePort(env.STUDY_ASSISTANT_PORT, 8788);
 const TOKEN = env.STUDY_ASSISTANT_TOKEN || 'change-me';
 const OLLAMA_BASE_URL = (env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
-const OLLAMA_MODEL = env.OLLAMA_MODEL || 'gemma4:latest';
+const OLLAMA_MODEL = env.OLLAMA_MODEL || 'gemma4:12b-it-q4_K_M';
 const OLLAMA_TIMEOUT_MS = parsePositiveInt(env.OLLAMA_TIMEOUT_MS, 600000);
 const OLLAMA_NUM_CTX = parsePositiveInt(env.OLLAMA_NUM_CTX, 8192);
 const MAX_INPUT_LENGTH = parsePositiveInt(env.STUDY_ASSISTANT_MAX_INPUT_LENGTH, 16000);
+const OLLAMA_KEEP_ALIVE = env.OLLAMA_KEEP_ALIVE || '5m';
+const OLLAMA_THINKING_MODE = normalizeThinkingMode(env.OLLAMA_THINKING_MODE);
 const VALID_OUTPUT_MODES = new Set(['mac', 'windows', 'both']);
 const VIEWER_HTML = `<!doctype html>
 <html lang="en">
@@ -139,7 +141,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === 'POST' && req.url === '/study-answer') {
+    if (req.method === 'POST' && ['/study-answer', '/study-answer/stream'].includes(req.url)) {
       if (!isAuthorized(req)) {
         return sendJson(res, 401, { error: 'Unauthorized' });
       }
@@ -160,17 +162,51 @@ const server = createServer(async (req, res) => {
 
       const outputMode = normalizeOutputMode(body.outputMode);
       const shouldShowOnWindows = outputMode === 'windows' || outputMode === 'both';
+      const streamsToMac = req.url === '/study-answer/stream';
 
       if (shouldShowOnWindows) {
         setLatestAnswerState('Finding answer...', outputMode, 'working');
       }
 
+      if (streamsToMac) {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+      }
+
+      const sendStreamEvent = (event) => {
+        if (streamsToMac && !res.writableEnded && !res.destroyed) {
+          res.write(`${JSON.stringify(event)}\n`);
+        }
+      };
+
       let answer;
       try {
-        answer = await generateAnswer(text);
+        answer = await generateAnswer(text, {
+          onContent: (accumulated, delta) => {
+            if (shouldShowOnWindows) {
+              setLatestAnswerState(accumulated, outputMode, 'working');
+            }
+            sendStreamEvent({ type: 'delta', content: delta });
+          },
+          onRetry: () => {
+            if (shouldShowOnWindows) {
+              setLatestAnswerState('Rechecking answer...', outputMode, 'working');
+            }
+            sendStreamEvent({ type: 'reset' });
+            sendStreamEvent({ type: 'status', message: 'Rechecking answer…' });
+          }
+        });
       } catch (error) {
         if (shouldShowOnWindows) {
           setLatestAnswerState('Request failed', outputMode, 'error');
+        }
+        if (streamsToMac) {
+          sendStreamEvent({ type: 'error', error: 'The model request failed.' });
+          res.end();
+          return;
         }
         throw error;
       }
@@ -178,11 +214,20 @@ const server = createServer(async (req, res) => {
       if (shouldShowOnWindows) {
         setLatestAnswerState(answer, outputMode, 'ready');
       }
+      if (streamsToMac) {
+        sendStreamEvent({ type: 'done', answer });
+        res.end();
+        return;
+      }
       return sendJson(res, 200, { answer });
     }
 
     return sendJson(res, 404, { error: 'Not found' });
   } catch (error) {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
     const statusCode = error?.statusCode || 500;
     const message = error?.expose ? error.message : 'Internal server error';
     return sendJson(res, statusCode, { error: message });
@@ -195,26 +240,32 @@ server.listen(PORT, HOST, () => {
   console.log(`Ollama base URL: ${OLLAMA_BASE_URL}`);
   console.log(`Model: ${OLLAMA_MODEL}`);
   console.log(`Ollama context window: ${OLLAMA_NUM_CTX} tokens`);
+  console.log(`Ollama keep_alive: ${OLLAMA_KEEP_ALIVE}`);
+  console.log(`Ollama thinking mode: ${OLLAMA_THINKING_MODE}`);
   console.log(`Maximum input: ${MAX_INPUT_LENGTH} characters`);
   if (lanAddresses.length > 0) {
     console.log(`LAN access: ${lanAddresses.map((address) => `http://${address}:${PORT}`).join(', ')}`);
   }
 });
 
-async function generateAnswer(text) {
+async function generateAnswer(text, handlers = {}) {
   const requestId = ++nextStudyRequestId;
   const startedAt = performance.now();
   let attempts = 0;
+  const think = shouldEnableThinking(text);
 
-  console.log(`study-answer started requestId=${requestId} chars=${text.length} num_ctx=${OLLAMA_NUM_CTX}`);
+  console.log(
+    `study-answer started requestId=${requestId} chars=${text.length} num_ctx=${OLLAMA_NUM_CTX} think=${think} keep_alive=${OLLAMA_KEEP_ALIVE}`
+  );
   try {
     attempts += 1;
-    const firstAnswer = await requestModel(text, SYSTEM_PROMPT, requestId, 'initial');
+    const firstAnswer = await requestModel(text, SYSTEM_PROMPT, requestId, 'initial', think, handlers.onContent);
     if (!isUncertainAnswer(firstAnswer)) {
       return firstAnswer;
     }
 
     console.log('Model returned an uncertain answer; retrying with best-guess instructions.');
+    handlers.onRetry?.();
     const bestGuessPrompt = [
       'Solve the study question again using the input and all visible answer choices.',
       'You must select the most plausible answer choice whenever choices are present, even if the image text is incomplete or you are uncertain.',
@@ -222,7 +273,8 @@ async function generateAnswer(text) {
       'For multiple questions, answer every question in order with its number and selected letter.'
     ].join(' ');
     attempts += 1;
-    return await requestModel(text, bestGuessPrompt, requestId, 'best-guess');
+    const retryThink = OLLAMA_THINKING_MODE === 'off' ? false : true;
+    return await requestModel(text, bestGuessPrompt, requestId, 'best-guess', retryThink, handlers.onContent);
   } finally {
     console.log(
       `study-answer finished requestId=${requestId} elapsedMs=${Math.round(performance.now() - startedAt)} attempts=${attempts} chars=${text.length}`
@@ -230,10 +282,12 @@ async function generateAnswer(text) {
   }
 }
 
-async function requestModel(text, systemPrompt, requestId, attempt) {
+async function requestModel(text, systemPrompt, requestId, attempt, think, onContent) {
   const payload = {
     model: OLLAMA_MODEL,
-    stream: false,
+    stream: true,
+    think,
+    keep_alive: OLLAMA_KEEP_ALIVE,
     options: {
       temperature: 0,
       num_ctx: OLLAMA_NUM_CTX
@@ -251,17 +305,22 @@ async function requestModel(text, systemPrompt, requestId, attempt) {
   };
 
   const startedAt = performance.now();
+  let timeToFirstTokenMs = null;
+  let accumulatedContent = '';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
   console.log(
-    `ollama request started requestId=${requestId} attempt=${attempt} model=${OLLAMA_MODEL} num_ctx=${OLLAMA_NUM_CTX} inputChars=${text.length}`
+    `ollama request started requestId=${requestId} attempt=${attempt} model=${OLLAMA_MODEL} num_ctx=${OLLAMA_NUM_CTX} think=${think} keep_alive=${OLLAMA_KEEP_ALIVE} inputChars=${text.length}`
   );
 
   try {
-    const response = await fetchWithTimeout(`${OLLAMA_BASE_URL}/api/chat`, {
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
 
     if (!response.ok) {
@@ -269,20 +328,62 @@ async function requestModel(text, systemPrompt, requestId, attempt) {
       throw createHttpError(502, `Ollama request failed${details ? `: ${details}` : '.'}`);
     }
 
-    const data = await response.json();
+    let pending = '';
+    let finalEvent = null;
+    const processLine = (line) => {
+      if (!line.trim()) return;
+
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        throw createHttpError(502, 'Ollama returned an invalid streaming response.');
+      }
+
+      const thinking = event?.message?.thinking;
+      const content = event?.message?.content;
+      if (timeToFirstTokenMs === null && ((typeof thinking === 'string' && thinking.length > 0) || (typeof content === 'string' && content.length > 0))) {
+        timeToFirstTokenMs = Math.round(performance.now() - startedAt);
+      }
+
+      if (typeof content === 'string' && content.length > 0) {
+        accumulatedContent += content;
+        onContent?.(accumulatedContent, content, attempt);
+      }
+
+      if (event?.done) {
+        finalEvent = event;
+      }
+    };
+
+    const decoder = new TextDecoder();
+    for await (const chunk of response.body) {
+      pending += decoder.decode(chunk, { stream: true });
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() ?? '';
+      for (const line of lines) processLine(line);
+    }
+    pending += decoder.decode();
+    if (pending.trim()) processLine(pending);
+
     const elapsedMs = Math.round(performance.now() - startedAt);
-    logOllamaUsage(data, elapsedMs, requestId, attempt);
-    const content = normalizeModelAnswer(data?.message?.content);
+    logOllamaUsage(finalEvent ?? {}, elapsedMs, requestId, attempt, timeToFirstTokenMs, think);
+    const content = normalizeModelAnswer(accumulatedContent);
     return content || 'Unable to determine';
   } catch (error) {
+    const requestError = error?.name === 'AbortError'
+      ? createHttpError(504, `Request timed out after ${OLLAMA_TIMEOUT_MS} ms.`)
+      : error;
     console.log(
-      `ollama request failed requestId=${requestId} attempt=${attempt} elapsedMs=${Math.round(performance.now() - startedAt)} error=${error?.statusCode || error?.name || 'Error'}`
+      `ollama request failed requestId=${requestId} attempt=${attempt} elapsedMs=${Math.round(performance.now() - startedAt)} error=${requestError?.statusCode || requestError?.name || 'Error'}`
     );
-    throw error;
+    throw requestError;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-function logOllamaUsage(data, elapsedMs, requestId, attempt) {
+function logOllamaUsage(data, elapsedMs, requestId, attempt, timeToFirstTokenMs, think) {
   const promptTokens = finiteNumber(data?.prompt_eval_count);
   const completionTokens = finiteNumber(data?.eval_count);
   const contextTokens = promptTokens === null || completionTokens === null
@@ -302,6 +403,8 @@ function logOllamaUsage(data, elapsedMs, requestId, attempt) {
     `requestId=${requestId}`,
     `attempt=${attempt}`,
     `elapsedMs=${elapsedMs}`,
+    `timeToFirstTokenMs=${timeToFirstTokenMs ?? 'unknown'}`,
+    `think=${think}`,
     `num_ctx=${OLLAMA_NUM_CTX}`,
     `promptTokens=${promptTokens ?? 'unknown'}`,
     `completionTokens=${completionTokens ?? 'unknown'}`,
@@ -309,8 +412,29 @@ function logOllamaUsage(data, elapsedMs, requestId, attempt) {
     `contextUsagePercent=${contextUsagePercent ?? 'unknown'}`,
     `promptEvalMs=${promptEvalMs ?? 'unknown'}`,
     `evalMs=${evalMs ?? 'unknown'}`,
+    `ollamaTotalMs=${nanosecondsToMilliseconds(data?.total_duration) ?? 'unknown'}`,
+    `loadMs=${nanosecondsToMilliseconds(data?.load_duration) ?? 'unknown'}`,
     `generationTokensPerSecond=${generationTokensPerSecond ?? 'unknown'}`
   ].join(' '));
+}
+
+function shouldEnableThinking(text) {
+  if (OLLAMA_THINKING_MODE === 'on') return true;
+  if (OLLAMA_THINKING_MODE === 'off') return false;
+
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const optionCount = lines.filter((line) => /^(?:\(?[A-Za-z]\)?[.)]|[A-Za-z]\s*[-:])\s+\S/.test(line)).length;
+  const questionCount = (text.match(/\?/g) ?? []).length;
+  const wordCount = text.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
+  const arithmeticExpressions = text.match(/\d\s*[+×÷*/−-]\s*\d/g)?.length ?? 0;
+  const complexCue = /\b(?:analy[sz]e|compare|contrast|evaluate|justify|explain|infer|deduce|predict|mechanism|multi[- ]step|why|how (?:does|would|can|did|could)|based on (?:the )?(?:data|results|evidence|experiment|passage))\b/i.test(text);
+
+  const straightforwardMultipleChoice = optionCount >= 2
+    && questionCount <= 1
+    && wordCount <= 80
+    && arithmeticExpressions <= 1
+    && !complexCue;
+  return !straightforwardMultipleChoice;
 }
 
 function finiteNumber(value) {
@@ -429,6 +553,11 @@ function parsePositiveInt(value, fallback) {
     return fallback;
   }
   return parsed;
+}
+
+function normalizeThinkingMode(value) {
+  const mode = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return ['auto', 'on', 'off'].includes(mode) ? mode : 'auto';
 }
 
 function createHttpError(statusCode, message, expose = false) {

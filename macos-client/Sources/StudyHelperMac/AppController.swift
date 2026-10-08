@@ -201,7 +201,22 @@ final class AppController: NSObject {
                 }
                 try Task.checkCancellation()
 
-                let answer = try await self.bridgeClient.fetchStudyAnswer(for: questionText, outputMode: outputMode)
+                let answer = try await self.bridgeClient.fetchStudyAnswer(
+                    for: questionText,
+                    outputMode: outputMode,
+                    onPartialAnswer: { partialAnswer in
+                        guard self.latestRequestID == requestID, outputMode.sendsPopupToMac else { return }
+                        if partialAnswer.isEmpty {
+                            self.popupController.showLoading(text: "Rechecking…")
+                        } else {
+                            self.popupController.showStreamingMessage(partialAnswer)
+                        }
+                    },
+                    onStatus: { status in
+                        guard self.latestRequestID == requestID, outputMode.sendsPopupToMac else { return }
+                        self.popupController.showLoading(text: status)
+                    }
+                )
                 try Task.checkCancellation()
 
                 await MainActor.run {
