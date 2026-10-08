@@ -27,6 +27,35 @@ precondition(
     "fill-in-the-blank extraction included screen controls or dropped the prompt"
 )
 
+let chloroplastQuestion = "The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n) ____."
+precondition(
+    QuestionTextExtractor.extract(from: ["File Edit View Insert Format", chloroplastQuestion, "Submit", "Ask Google"]) == [chloroplastQuestion],
+    "chloroplast fill-in extraction changed or dropped the trailing blank"
+)
+
+let chloroplastQuestionWithoutOCRBlank = "The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n)"
+precondition(
+    QuestionTextExtractor.extract(from: ["File Edit View Insert Format", chloroplastQuestionWithoutOCRBlank, "Submit", "Ask Google"]) == [chloroplastQuestionWithoutOCRBlank],
+    "chloroplast question capture failed when OCR omitted the trailing blank marker"
+)
+
+let chloroplastChoices = [
+    "File Edit View Insert Format",
+    chloroplastQuestion,
+    "Option 1: mitochondrion",
+    "Option 2: chloroplast",
+    "Submit",
+    "Ask Google"
+]
+precondition(
+    QuestionTextExtractor.extract(from: chloroplastChoices) == [
+        chloroplastQuestion,
+        "Option 1: mitochondrion",
+        "Option 2: chloroplast"
+    ],
+    "Option N choice lines were dropped or screen controls leaked into the Mac input"
+)
+
 let splitLabelInput = [
     "Which structure allows gas exchange?",
     "(A)", "stomata",

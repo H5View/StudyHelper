@@ -41,7 +41,7 @@ public enum QuestionTextExtractor {
                 result.append(contentsOf: options.enumerated().map { "Option \($0.offset + 1): \($0.element)" })
                 return result
             }
-            return content
+            return content.filter { !isScreenControl($0) }
         }
 
         var selectedIndices = Set<Int>()
@@ -82,6 +82,7 @@ public enum QuestionTextExtractor {
             let questionIsComplete = questionLine.contains("?") || questionLine.hasSuffix("=")
             var continuationCount = 0
             while nextIndex < content.count && !questionIndices.contains(nextIndex) {
+                if isScreenControl(content[nextIndex]) { break }
                 if isAnswerChoiceLine(content[nextIndex]) { break }
                 guard !questionIsComplete && continuationCount < 4 else { break }
                 selectedIndices.insert(nextIndex)
@@ -99,14 +100,14 @@ public enum QuestionTextExtractor {
 
     private static func isAnswerChoiceLine(_ line: String) -> Bool {
         line.range(
-            of: #"^\s*(?:\([A-Za-z]\)|[A-Za-z][.)]|[A-Za-z]\s*[-:])(?:\s*\S.*)?\s*$"#,
+            of: #"^\s*(?:Option\s+\d+\s*[:.)-]|\([A-Za-z]\)|[A-Za-z][.)]|[A-Za-z]\s*[-:])(?:\s*\S.*)?\s*$"#,
             options: .regularExpression
         ) != nil
     }
 
     private static func isAnswerChoiceLabelOnly(_ line: String) -> Bool {
         line.range(
-            of: #"^\s*(?:\([A-Za-z]\)|[A-Za-z][.)]|[A-Za-z]\s*[-:])\s*$"#,
+            of: #"^\s*(?:Option\s+\d+\s*[:.)-]?|\([A-Za-z]\)|[A-Za-z][.)]|[A-Za-z]\s*[-:])\s*$"#,
             options: .regularExpression
         ) != nil
     }
@@ -158,7 +159,7 @@ public enum QuestionTextExtractor {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isAnswerChoiceLine(trimmed) else { return false }
         if trimmed.contains("?") || trimmed.range(
-            of: #"\d\s*[+×÷*/−-]\s*\d|_+|\.{3,}|\bfill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\b|\bcomplete\s+(?:the\s+)?(?:blank|sentence|statement)\b|\b(?:missing|insert|supply)\s+(?:the\s+)?(?:words?|terms?|phrases?)\b|\b(?:stands\s+for|is\s+the|are\s+the|is\s+called|is\s+known\s+as)\s*[.!]?\s*$"#,
+            of: #"\d\s*[+×÷*/−-]\s*\d|_+|\.{3,}|\bfill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\b|\bcomplete\s+(?:the\s+)?(?:blank|sentence|statement)\b|\b(?:missing|insert|supply)\s+(?:the\s+)?(?:words?|terms?|phrases?)\b|\b(?:stands\s+for|is\s+the|are\s+the|is\s+called|is\s+known\s+as)\s*(?:a\(n\))?\s*[.!]?\s*$"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil {
             return true

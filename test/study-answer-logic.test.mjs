@@ -137,6 +137,21 @@ test('fill-in formatting extracts only reliable blank spans at the beginning, mi
   );
 });
 
+test('chloroplast fill-in strips an Option label and rejects a prefix-only response at a trailing blank', () => {
+  const question = 'The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n) ____.';
+  const questionWithoutOcrBlank = 'The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n)';
+  const completedSentence = 'Option 2: The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n) chloroplast.';
+  const incompletePrefix = 'Option 2: The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n)';
+
+  assert.equal(detectQuestionType(question), 'fill-in-the-blank');
+  assert.equal(detectQuestionType(questionWithoutOcrBlank), 'fill-in-the-blank');
+  assert.equal(extractFillInAnswer(completedSentence, question), 'chloroplast');
+  assert.equal(extractFillInAnswer('Option 2: chloroplast', question), 'chloroplast');
+  assert.equal(formatFillInAnswer(incompletePrefix, question).reliable, false);
+  assert.equal(extractFillInAnswer(incompletePrefix, question), 'Unable to determine');
+  assert.equal(extractFillInAnswer(incompletePrefix, questionWithoutOcrBlank), 'Unable to determine');
+});
+
 test('parenthesized and no-space labels are detected as choices', () => {
   const text = 'Which structure carries oxygen?\n(A) alveoli\n(B) stomata\n(C) xylem\n(D) villi';
   assert.equal(parseChoiceGroups(text)[0].length, 4);

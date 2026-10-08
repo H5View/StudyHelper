@@ -28,6 +28,10 @@ const ollama = createServer(async (request, response) => {
     uncertainRetryCase ? 'Ask Google' :
       question.includes('NO_RETRY_FILL') ? 'Unable to determine' :
       question.includes('Option 4: stomata') ? 'stomata' :
+        question.includes('double membrane-bounded organelle')
+          ? powerhouseRequestCount === 1
+            ? 'Option 2: The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n)'
+            : 'chloroplast' :
         question.includes('powerhouse of the cell')
           ? powerhouseRequestCount === 1 ? 'The powerhouse of the cell is the' : 'mitochondrion' :
           question.includes('DNA stands for') ? 'DNA stands for deoxyribonucleic acid.' :
@@ -126,6 +130,8 @@ try {
   assert.equal(calls[1].think, false);
 
   const fillIns = [
+    ['The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n) ____.', 'chloroplast'],
+    ['The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n)', 'chloroplast'],
     ['The powerhouse of the cell is the _____.', 'mitochondrion'],
     ['DNA stands for ____.', 'deoxyribonucleic acid'],
     ['____ is the process of cell division.', 'mitosis'],
@@ -144,7 +150,7 @@ try {
       expectedAnswer,
       'stream exposed the model completed sentence instead of only the missing span'
     );
-    const neededRetry = question.includes('powerhouse of the cell');
+    const neededRetry = question.includes('powerhouse of the cell') || question.includes('double membrane-bounded organelle');
     const expectedRequestCount = neededRetry ? 2 : 1;
     assert.equal(calls.length, before + expectedRequestCount, 'only an unreliable fill-in response should trigger one retry');
     const initialPayload = calls[before];
@@ -157,12 +163,22 @@ try {
     assert.match(initialPayload.messages[0].content, /never repeat the question or return the completed sentence/);
     assert.match(initialPayload.messages[0].content, /Do not include an explanation, introduction, quotation marks, or labels/);
     if (neededRetry) {
-      assert.equal(rawModelResponses[before].answer, 'The powerhouse of the cell is the', 'test must compare the raw Ollama final response');
+      const rawPrefix = question.includes('double membrane-bounded organelle')
+        ? 'Option 2: The double membrane-bounded organelle in algae and plants, where photosynthesis takes place, is called a(n)'
+        : 'The powerhouse of the cell is the';
+      const retryAnswer = question.includes('double membrane-bounded organelle') ? 'chloroplast' : 'mitochondrion';
+      assert.equal(rawModelResponses[before].answer, rawPrefix, 'test must compare the raw Ollama final response');
       const retryPayload = calls[before + 1];
       assert.equal(retryPayload.think, false, 'fill-in extraction retry must disable thinking');
       assert.match(retryPayload.messages[0].content, /Return ONLY the missing word or shortest correct phrase/);
       assert.match(retryPayload.messages[0].content, /Do not repeat any part of the question/);
-      assert.equal(rawModelResponses[before + 1].answer, 'mitochondrion');
+      assert.equal(rawModelResponses[before + 1].answer, retryAnswer);
+      assert.ok(response.events.some((event) => event.type === 'reset'), 'Mac stream did not receive a reset before the corrected answer');
+      assert.equal(
+        JSON.stringify(response.events).includes(rawPrefix),
+        false,
+        'the incomplete model prefix reached the Mac stream'
+      );
     }
     const payload = calls.at(-1);
     assert.equal(payload.think, false, 'straightforward fill-in-the-blank enabled thinking');
@@ -172,7 +188,7 @@ try {
 
   assert.deepEqual(
     fillIns.map(([, expectedAnswer]) => expectedAnswer),
-    ['mitochondrion', 'deoxyribonucleic acid', 'mitosis', 'nucleus', 'photosynthesis', 'Photosynthesis', 'chemical', 'glucose; oxygen']
+    ['chloroplast', 'chloroplast', 'mitochondrion', 'deoxyribonucleic acid', 'mitosis', 'nucleus', 'photosynthesis', 'Photosynthesis', 'chemical', 'glucose; oxygen']
   );
 
   const jsonFillAnswer = await postJson(bridgePort, 'DNA stands for ____.');
@@ -195,10 +211,10 @@ try {
   const retryQuestion = `RETRY_CASE\nExplain why plants need stomata.\nA) trichomes\nB) internodes\nC) stipules\nD) stomata`;
   const retried = await postStream(bridgePort, retryQuestion);
   assert.equal(retried.answer, 'D — stomata');
-  assert.equal(calls.length, 16, 'uncertain multiple-choice answer should receive exactly one retry');
-  assert.equal(calls[14].think, true, 'complex initial request should permit thinking');
-  assert.equal(calls[15].think, false, 'short retry should disable thinking');
-  assert.equal(calls[15].options.num_predict, 96, 'retry must respect the configured output token limit');
+  assert.equal(calls.length, 20, 'uncertain multiple-choice answer should receive exactly one retry');
+  assert.equal(calls[18].think, true, 'complex initial request should permit thinking');
+  assert.equal(calls[19].think, false, 'short retry should disable thinking');
+  assert.equal(calls[19].options.num_predict, 96, 'retry must respect the configured output token limit');
 
   assert.match(logs, /questionType=multiple-choice .*think=false thinkReason=straightforward-multiple-choice detectedChoices=4/);
   assert.match(logs, /questionType=fill-in-the-blank .*think=false thinkReason=straightforward-fill-in-the-blank detectedChoices=0/);

@@ -4,7 +4,7 @@ const NUMBERED_CHOICE = /^\s*option\s+(\d+)\s*[:.)-]\s*(.*)$/i;
 const COMPLEX_CUE = /\b(?:analy[sz]e|compare|contrast|evaluate|justify|explain|infer|deduce|predict|mechanism|multi[- ]step|why|how\s+(?:does|would|can|did|could)|based on (?:the )?(?:data|results|evidence|experiment|passage))\b/i;
 const FILL_IN_CUE = /(?:_+|\.{3,}|…{1,}|\[\s*(?:blank|\s{2,})\s*\]|\(\s*(?:blank|\s{2,})\s*\)|\bfill(?:ing)?\s+(?:in\s+)?(?:the\s+)?blank\b|\bcomplete\s+(?:the\s+)?(?:blank|sentence|statement)\b|\b(?:missing|insert|supply)\s+(?:the\s+)?(?:words?|terms?|phrases?)\b|\bmissing\s+terms?\b)/i;
 const BLANK_MARKER = /\\?_+|\.{3,}|…+|\[\s*(?:blank|\s{2,})\s*\]|\(\s*(?:blank|\s{2,})\s*\)/gi;
-const INCOMPLETE_FILL_ENDING = /\b(?:is|are|was|were|stands\s+for|called|known\s+as|equals|means|becomes?|converts?\s+into|results?\s+in|consists?\s+of)\s+(?:the|a|an)?\s*$/i;
+const INCOMPLETE_FILL_ENDING = /\b(?:is|are|was|were|stands\s+for|called|known\s+as|equals|means|becomes?|converts?\s+into|results?\s+in|consists?\s+of)\s+(?:the|a|an|a\(n\))?\s*$/i;
 const UNCERTAIN_START = /^\s*(?:unable to determine|cannot determine|can't determine|not enough information|insufficient information|cannot be determined|i (?:do not|don't) know|i am not sure|i'm not sure|ask google|search (?:google|online)|look it up)\b/i;
 
 export function parseChoiceGroups(text) {
@@ -274,6 +274,7 @@ function cleanFillAnswer(value) {
   let answer = String(value ?? '').trim();
   answer = answer.replace(/^```(?:[\w+-]+)?\s*|\s*```$/g, '').trim();
   answer = stripFillInInstruction(answer);
+  answer = answer.replace(/^\s*option\s+\d+\s*[:.)—–-]\s*/i, '').trim();
   answer = answer.replace(
     /^(?:(?:the\s+)?answer|(?:the\s+)?missing\s+(?:word|term|phrase)|(?:the\s+)?completed\s+sentence)\s*(?::\s*|[-—–]\s*|\bis\b\s*:?\s*)/i,
     ''
