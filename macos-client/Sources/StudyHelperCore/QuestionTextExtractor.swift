@@ -151,7 +151,8 @@ public enum QuestionTextExtractor {
     }
 
     private static func isAnswerChoiceLine(_ line: String) -> Bool {
-        line.range(
+        guard !isScreenControl(line) else { return false }
+        return line.range(of: #"^[A-Z]$"#, options: .regularExpression) != nil || line.range(
             of: #"^\s*(?:Option\s+\d+\s*[:.)-]|\([A-Za-z]\)|[A-Za-z][.)]|[A-Za-z]\s*[-:])(?:\s*\S.*)?\s*$"#,
             options: .regularExpression
         ) != nil
@@ -230,7 +231,7 @@ public enum QuestionTextExtractor {
     }
 
     private static func isAnswerChoiceLabelOnly(_ line: String) -> Bool {
-        line.range(
+        line.range(of: #"^[A-Z]$"#, options: .regularExpression) != nil || line.range(
             of: #"^\s*(?:Option\s+\d+\s*[:.)-]?|\([A-Za-z]\)|[A-Za-z][.)]|[A-Za-z]\s*[-:])\s*$"#,
             options: .regularExpression
         ) != nil
@@ -250,16 +251,18 @@ public enum QuestionTextExtractor {
             nextIndex += 1
             choiceCount += 1
 
-            if labelOnly && nextIndex < content.count && !isAnswerChoiceLine(content[nextIndex]) {
+            if labelOnly && nextIndex < content.count
+                && (!isAnswerChoiceLine(content[nextIndex]) || content[nextIndex].range(of: #"^[A-Z]$"#, options: .regularExpression) != nil)
+                && !isScreenControl(content[nextIndex]) {
                 selectedIndices.insert(nextIndex)
                 nextIndex += 1
-                continue
             }
 
             var continuationCount = 0
             while nextIndex < content.count && !isAnswerChoiceLine(content[nextIndex]) && continuationCount < 3 {
                 let continuation = content[nextIndex].trimmingCharacters(in: .whitespacesAndNewlines)
                 let previousChoiceText = content[nextIndex - 1].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !isScreenControl(continuation), !isQuestionLine(continuation) else { break }
                 guard isLikelyChoiceContinuation(continuation, following: previousChoiceText) else { break }
                 selectedIndices.insert(nextIndex)
                 nextIndex += 1
@@ -329,7 +332,11 @@ public enum QuestionTextExtractor {
     }
 
     private static func isScreenControl(_ line: String) -> Bool {
-        line.range(
+        let body = strippingGeneratedOptionLabel(line)
+        // Labeled High/Medium/Low can be real choices. A confidence heading
+        // stops option collection before its buttons are reached.
+        if body != line && ["high", "medium", "low"].contains(body.lowercased()) { return false }
+        return body.range(
             of: #"^\s*(?:[•·]\s*)?(?:submit|next|previous|back|check answer|save and continue|time left|question\s+\d+|review|clear my choice|ask google|ask gemini|need help\?|rate your confidence|high$|medium$|low$|privacy center$|terms of use$|he reading$|©|learning\.mheducation\.com)(?:\b|[^a-z]|$)"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil

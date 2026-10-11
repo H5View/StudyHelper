@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
-import { formatFillInAnswer, getThinkingDecision, matchAnswerToChoices, redactInputForDebug, resolveAnswer } from './study-answer-logic.mjs';
+import { formatFillInAnswer, getThinkingDecision, matchAnswerToChoices, parseChoiceGroups, redactInputForDebug, resolveAnswer, sanitizeQuestionInput } from './study-answer-logic.mjs';
 import { readOllamaEventStream } from './ollama-stream.mjs';
 
 const env = loadEnvFile();
@@ -19,6 +19,7 @@ const OLLAMA_THINKING_MODE = normalizeThinkingMode(env.OLLAMA_THINKING_MODE);
 const OLLAMA_NUM_PREDICT = parsePositiveInt(env.OLLAMA_NUM_PREDICT, 256);
 const OLLAMA_RETRY_NUM_PREDICT = parsePositiveInt(env.OLLAMA_RETRY_NUM_PREDICT, 128);
 const DEBUG_INPUT = env.STUDY_ASSISTANT_DEBUG_INPUT === '1';
+const DEBUG_ANSWERS = env.STUDY_ASSISTANT_DEBUG_ANSWERS === '1';
 const VALID_OUTPUT_MODES = new Set(['mac', 'windows', 'both']);
 const VIEWER_HTML = `<!doctype html>
 <html lang="en">
@@ -107,6 +108,7 @@ let latestAnswerState = {
   status: 'idle'
 };
 let nextStudyRequestId = 0;
+let latestViewerRequestId = 0;
 
 const server = createServer(async (req, res) => {
   try {
@@ -139,24 +141,29 @@ const server = createServer(async (req, res) => {
 
       const body = await readJsonBody(req);
       const rawText = typeof body.text === 'string' ? body.text : '';
-      const text = normalizeInput(rawText);
+      const normalizedText = normalizeInput(rawText);
 
-      if (!text) {
+      if (!normalizedText) {
         return sendJson(res, 400, { error: 'The text field is required.' });
       }
 
-      if (text.length > MAX_INPUT_LENGTH) {
+      if (normalizedText.length > MAX_INPUT_LENGTH) {
         return sendJson(res, 413, {
           error: `Input exceeds maximum length of ${MAX_INPUT_LENGTH} characters.`
         });
       }
+
+      const text = sanitizeQuestionInput(normalizedText);
+      if (!text) return sendJson(res, 400, { error: 'No question text remains after filtering screen controls.' });
+      const requestId = ++nextStudyRequestId;
 
       const outputMode = normalizeOutputMode(body.outputMode);
       const shouldShowOnWindows = outputMode === 'windows' || outputMode === 'both';
       const streamsToMac = req.url === '/study-answer/stream';
 
       if (shouldShowOnWindows) {
-        setLatestAnswerState('Finding answer...', outputMode, 'working');
+        latestViewerRequestId = requestId;
+        setLatestAnswerState('Finding answer...', outputMode, 'working', requestId);
       }
 
       if (streamsToMac) {
@@ -175,16 +182,16 @@ const server = createServer(async (req, res) => {
 
       let answer;
       try {
-        answer = await generateAnswer(text, {
+        answer = await generateAnswer(text, requestId, {
           onContent: (accumulated, delta) => {
             if (shouldShowOnWindows) {
-              setLatestAnswerState(accumulated, outputMode, 'working');
+              setLatestAnswerState(accumulated, outputMode, 'working', requestId);
             }
             sendStreamEvent({ type: 'delta', content: delta });
           },
           onRetry: () => {
             if (shouldShowOnWindows) {
-              setLatestAnswerState('Rechecking answer...', outputMode, 'working');
+              setLatestAnswerState('Rechecking answer...', outputMode, 'working', requestId);
             }
             sendStreamEvent({ type: 'reset' });
             sendStreamEvent({ type: 'status', message: 'Rechecking answer…' });
@@ -192,7 +199,7 @@ const server = createServer(async (req, res) => {
         });
       } catch (error) {
         if (shouldShowOnWindows) {
-          setLatestAnswerState('Request failed', outputMode, 'error');
+          setLatestAnswerState('Request failed', outputMode, 'error', requestId);
         }
         if (streamsToMac) {
           sendStreamEvent({ type: 'error', error: 'The model request failed.' });
@@ -203,8 +210,14 @@ const server = createServer(async (req, res) => {
       }
 
       if (shouldShowOnWindows) {
-        setLatestAnswerState(answer, outputMode, 'ready');
+        setLatestAnswerState(answer, outputMode, 'ready', requestId);
       }
+      if (DEBUG_ANSWERS) logAnswerDebug(requestId, 'viewer', {
+        outputMode,
+        finalAnswer: redactInputForDebug(answer),
+        viewerUpdated: shouldShowOnWindows && latestViewerRequestId === requestId,
+        viewerAnswer: shouldShowOnWindows ? redactInputForDebug(latestAnswerState.answer) : null
+      });
       if (streamsToMac) {
         sendStreamEvent({ type: 'done', answer });
         res.end();
@@ -236,14 +249,14 @@ server.listen(PORT, HOST, () => {
   console.log(`Ollama output token limit: ${OLLAMA_NUM_PREDICT}`);
   console.log(`Uncertain-answer retry token limit: ${OLLAMA_RETRY_NUM_PREDICT}`);
   console.log(`Input debug logging: ${DEBUG_INPUT ? 'enabled (redacted)' : 'disabled'}`);
+  console.log(`Answer debug logging: ${DEBUG_ANSWERS ? 'enabled (redacted)' : 'disabled'}`);
   console.log(`Maximum input: ${MAX_INPUT_LENGTH} characters`);
   if (lanAddresses.length > 0) {
     console.log(`LAN access: ${lanAddresses.map((address) => `http://${address}:${PORT}`).join(', ')}`);
   }
 });
 
-async function generateAnswer(text, handlers = {}) {
-  const requestId = ++nextStudyRequestId;
+async function generateAnswer(text, requestId, handlers = {}) {
   const startedAt = performance.now();
   let attempts = 0;
   const thinkingDecision = getThinkingDecision(text, OLLAMA_THINKING_MODE);
@@ -256,6 +269,16 @@ async function generateAnswer(text, handlers = {}) {
   if (DEBUG_INPUT) {
     console.log(`study input debug requestId=${requestId} text=${JSON.stringify(redactInputForDebug(text))}`);
   }
+  if (DEBUG_ANSWERS) {
+    logAnswerDebug(requestId, 'question', {
+      sanitizedQuestion: redactInputForDebug(text),
+      choices: parseChoiceGroups(text).map((group) => group.map((choice) => ({ ...choice, text: redactInputForDebug(choice.text) })))
+    });
+  }
+  const extracted = (answer, choice = null) => {
+    if (DEBUG_ANSWERS) logAnswerDebug(requestId, 'extracted', { extractedAnswer: redactInputForDebug(answer), choiceLabel: choice?.label ?? null });
+    return answer;
+  };
   try {
     attempts += 1;
     const onModelContent = questionType === 'fill-in-the-blank' ? undefined : handlers.onContent;
@@ -290,19 +313,19 @@ async function generateAnswer(text, handlers = {}) {
       // Hold raw generated text back until the completed-sentence fallback has
       // been reduced to the missing span, so neither UI can flash the question.
       handlers.onContent?.(formattedAnswer, formattedAnswer, 'formatted');
-      return formattedAnswer;
+      return extracted(formattedAnswer);
     }
     if (questionType !== 'multiple-choice') {
-      return firstAnswer;
+      return extracted(firstAnswer);
     }
 
     const firstResolution = resolveAnswer(firstAnswer, text);
     if (firstResolution.matchedChoice) {
       console.log(`study-answer choice matched requestId=${requestId} label=${firstResolution.choice.label}`);
-      return firstResolution.answer;
+      return extracted(firstResolution.answer, firstResolution.choice);
     }
     if (!firstResolution.shouldRetry) {
-      return firstAnswer;
+      return extracted(firstAnswer);
     }
 
     console.log(`study-answer retrying requestId=${requestId} reason=uncertain-without-matched-choice`);
@@ -322,7 +345,8 @@ async function generateAnswer(text, handlers = {}) {
       handlers.onContent,
       Math.min(OLLAMA_RETRY_NUM_PREDICT, OLLAMA_NUM_PREDICT)
     );
-    return matchAnswerToChoices(retryAnswer, text)?.answer ?? retryAnswer;
+    const retryChoice = matchAnswerToChoices(retryAnswer, text);
+    return extracted(retryChoice?.answer ?? retryAnswer, retryChoice);
   } finally {
     console.log(
       `study-answer finished requestId=${requestId} elapsedMs=${Math.round(performance.now() - startedAt)} attempts=${attempts} chars=${text.length}`
@@ -440,6 +464,11 @@ async function requestModel(text, systemPrompt, requestId, attempt, think, onCon
       think
     );
     const content = normalizeModelAnswer(accumulatedContent);
+    if (DEBUG_ANSWERS) logAnswerDebug(requestId, 'model', {
+      attempt,
+      rawModelResponse: redactInputForDebug(accumulatedContent),
+      normalizedAnswer: redactInputForDebug(content)
+    });
     return content || 'Unable to determine';
   } catch (error) {
     const requestError = error?.name === 'AbortError'
@@ -552,13 +581,20 @@ function normalizeOutputMode(value) {
   return VALID_OUTPUT_MODES.has(mode) ? mode : 'mac';
 }
 
-function setLatestAnswerState(answer, outputMode, status) {
+function setLatestAnswerState(answer, outputMode, status, requestId) {
+  // A cancelled Mac request can finish after its replacement. Its stream,
+  // completion, or error must not replace the newer Windows viewer state.
+  if (requestId !== latestViewerRequestId) return;
   latestAnswerState = {
     answer,
     timestamp: new Date().toISOString(),
     outputMode,
     status
   };
+}
+
+function logAnswerDebug(requestId, stage, details) {
+  if (DEBUG_ANSWERS) console.log(`study-answer debug ${JSON.stringify({ requestId, stage, ...details })}`);
 }
 
 function normalizeModelAnswer(value) {

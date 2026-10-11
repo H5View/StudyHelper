@@ -9,9 +9,69 @@ import {
   matchAnswerToChoices,
   parseChoiceGroups,
   redactInputForDebug,
-  resolveAnswer
+  resolveAnswer,
+  sanitizeQuestionInput
 } from '../study-answer-logic.mjs';
 import { readOllamaEventStream } from '../ollama-stream.mjs';
+import { biologyQuestions, confidenceControls } from './multiple-choice-fixtures.mjs';
+
+for (const { label, question, expected } of biologyQuestions) {
+  test(`five-choice biology answer ${label} survives extraction and distractor mentions`, () => {
+    assert.equal(getThinkingDecision(question).choiceCount, 5);
+    assert.equal(getThinkingDecision(question).think, false);
+    for (const raw of [label, expected, `**${expected}**`, `\`\`\`text\n${expected}\n\`\`\``, `The correct answer is ${label}.`, `${expected}. Choice B — is a distractor.`]) {
+      assert.equal(matchAnswerToChoices(raw, question)?.label, label, raw);
+      assert.equal(resolveAnswer(raw, question).shouldRetry, false);
+    }
+  });
+}
+
+test('five real options stay five when confidence controls are raw or Option-wrapped', () => {
+  const { stem, choices, question } = biologyQuestions[2];
+  for (const controls of [confidenceControls, ['Rate your confidence to submit your answer.', 'High', 'Medium', 'Low']]) {
+    for (const text of [
+      [question, ...controls].join('\n'),
+      [stem, ...choices.map((text, index) => `Option ${index + 1}: ${text}`), ...controls].join('\n'),
+      [stem, 'Options:', ...choices, ...controls].join('\n')
+    ]) {
+      const groups = parseChoiceGroups(text);
+      assert.equal(groups.length, 1);
+      assert.equal(groups[0].length, 5);
+      assert.deepEqual(groups[0].map((choice) => choice.text), choices);
+      assert.equal(getThinkingDecision(text).choiceCount, 5);
+    }
+  }
+});
+
+test('split labels retain uppercase choice text and stop at controls', () => {
+  const { stem, choices } = biologyQuestions[2];
+  const text = [stem, ...choices.flatMap((text, index) => [`(${'ABCDE'[index]})`, text]), 'submit', 'next'].join('\n');
+  assert.deepEqual(parseChoiceGroups(text)[0].map((choice) => choice.text), choices);
+  assert.equal(matchAnswerToChoices('Chloroplast', text)?.label, 'C');
+});
+
+test('a distractor reference is not an answer declaration', () => {
+  const { question } = biologyQuestions[2];
+  assert.equal(matchAnswerToChoices('Unlike choice B — Mitochondrion, the answer is C.', question)?.label, 'C');
+  assert.equal(matchAnswerToChoices('Choice B — Mitochondrion is incorrect.', question), null);
+});
+
+test('control filtering preserves real labeled choices and is idempotent', () => {
+  const question = 'Which level is greatest?\nOption 1: High\nOption 2: Medium\nOption 3: Low';
+  assert.equal(sanitizeQuestionInput(question), question);
+  assert.equal(parseChoiceGroups(question)[0].length, 3);
+  const labeled = 'Which term describes the process?\nA. Back pressure\nB. Next generation\nC. Review cycle';
+  assert.equal(sanitizeQuestionInput(labeled), labeled);
+  const filtered = sanitizeQuestionInput(`${biologyQuestions[2].question}\n${confidenceControls.join('\n')}`);
+  assert.equal(filtered, biologyQuestions[2].question);
+  assert.equal(sanitizeQuestionInput(filtered), filtered);
+});
+
+test('split labels can have a one-letter choice value', () => {
+  const question = 'Which base pairs with thymine?\n(A)\nA\n(B)\nG\n(C)\nC\n(D)\nT';
+  assert.deepEqual(parseChoiceGroups(question)[0].map((choice) => choice.text), ['A', 'G', 'C', 'T']);
+  assert.equal(matchAnswerToChoices('A', question)?.answer, 'A — A');
+});
 
 const stomataQuestion = [
   'Plant leaves contain small openings called ________, through which carbon dioxide enters the plant.',

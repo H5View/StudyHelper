@@ -20,8 +20,8 @@ Minimal standalone Node.js bridge for sending selected study text to a local Oll
 
 ## Tests
 
-- `npm test` runs bridge decision, answer matching, redaction, and Ollama stream parsing regressions.
-- `npm run test:integration` runs the bridge against a local mock Ollama endpoint.
+- `npm test` runs bridge decision, A–E answer matching, split-label detection, control filtering, redaction, and Ollama stream parsing regressions.
+- `npm run test:integration` runs the bridge against a local mock Ollama endpoint, checks Mac captures for five-choice biology questions whose known answers cover A–E, and compares raw model content, both answer endpoints, `/latest-answer`, and the actual `/viewer` rendering script. It also checks overlapping requests and debugging enabled/disabled. These tests verify the bridge pipeline, not the real model's biology knowledge.
 - `cd macos-client && swift run StudyHelperCoreRegression` checks Mac question extraction, labeled and unlabeled choices, and screen-control filtering.
 
 ## Setup
@@ -58,9 +58,10 @@ OLLAMA_RETRY_NUM_PREDICT=128
 OLLAMA_TIMEOUT_MS=600000
 STUDY_ASSISTANT_MAX_INPUT_LENGTH=16000
 STUDY_ASSISTANT_DEBUG_INPUT=0
+STUDY_ASSISTANT_DEBUG_ANSWERS=0
 ```
 
-`OLLAMA_NUM_CTX` is sent to Ollama as `options.num_ctx` on every chat request. The default is 8,192 tokens; set it to `4096` in `.env` and restart the bridge if the larger context causes GPU memory pressure. The bridge logs the configured context, Ollama's prompt and generated token counts, estimated context utilization, and request timings. These logs do not include question text or model answers.
+`OLLAMA_NUM_CTX` is sent to Ollama as `options.num_ctx` on every chat request. The default is 8,192 tokens; set it to `4096` in `.env` and restart the bridge if the larger context causes GPU memory pressure. The bridge logs the configured context, Ollama's prompt and generated token counts, estimated context utilization, and request timings. Default logs do not include question text or model answers.
 
 `OLLAMA_MODEL` selects the model for the bridge and defaults to `gemma4:12b-it-q4_K_M`. Change this environment value to move to another Ollama model; the Mac client displays the model reported by `/health` and does not choose a model itself.
 
@@ -70,11 +71,28 @@ STUDY_ASSISTANT_DEBUG_INPUT=0
 
 `OLLAMA_KEEP_ALIVE` is sent as Ollama's `keep_alive` field and defaults to `5m`. Set it to `0` to unload the model after a request or choose a longer duration when you want fewer reloads. Avoid `-1` on a GPU with limited free memory unless you intend to keep the model resident indefinitely.
 
-The bridge logs the detected question type, thinking decision, and number of detected choices for each request. `thinkReason=forced-on` means the Windows `.env` sets `OLLAMA_THINKING_MODE=on`; `thinkReason=straightforward-fill-in-the-blank` means an ordinary fill-in question is using the fast path. Set `STUDY_ASSISTANT_DEBUG_INPUT=1` temporarily to print the received text to the bridge console with names in `Name:` fields, emails, URLs, phone numbers, and long numeric IDs redacted. It is off by default; turn it back off after debugging. The bridge never writes this trace to a file itself.
+The bridge logs the detected question type, thinking decision, and number of detected choices for each request. `thinkReason=forced-on` means the Windows `.env` sets `OLLAMA_THINKING_MODE=on`; `thinkReason=straightforward-fill-in-the-blank` means an ordinary fill-in question is using the fast path. Set `STUDY_ASSISTANT_DEBUG_INPUT=1` temporarily to print the sanitized question to the bridge console with names in `Name:` fields, emails, URLs, phone numbers, and long numeric IDs redacted. It is off by default; turn it back off after debugging. The bridge never writes this trace to a file itself.
+
+For answer extraction debugging, set `STUDY_ASSISTANT_DEBUG_ANSWERS=1` in `.env` and restart the bridge. This adds JSON console records prefixed with `study-answer debug`, linked by `requestId`:
+
+- `stage: "question"`: `sanitizedQuestion` and the detected choice groups/labels.
+- `stage: "model"`: `rawModelResponse` (accumulated Ollama `message.content` before trimming or truncation) and `normalizedAnswer`, separately for each attempt.
+- `stage: "extracted"`: `extractedAnswer` and `choiceLabel`.
+- `stage: "viewer"`: `finalAnswer`, `viewerAnswer`, `outputMode`, and `viewerUpdated`. Mac-only requests have `viewerAnswer: null`; an older request finishing late has `viewerUpdated: false`.
+
+All content fields use the same identifier redaction. Hidden Ollama thinking is excluded. Debugging is disabled by default and adds no model calls; turn it off after capturing the problematic request. Compare the raw selected letter with `choiceLabel`, then compare `extractedAnswer` with `viewerAnswer`. This distinguishes a model answer from an extraction or stale-request problem.
+
+## Multiple-choice extraction fixes
+
+The Mac screen extractor previously treated bare labels and their text on separate lines (`A`, `Nucleus`, `B`, `Mitochondrion`, …) as separate unlabeled options. Its eight-option cap produced `Option 1: A` through `Option 8: Ribosome`, dropping E and changing the original label mapping. Both the Mac extractor and bridge now recognize split bare A–E labels and retain uppercase choice text. Known screen controls, including synthetic `Option N` confidence headings, are filtered before the bridge sends the question to Ollama.
+
+The bridge also preferred a contextual letter in an explanation over the leading selected letter. A raw response such as `C — Chloroplast. Choice B — Mitochondrion performs cellular respiration.` was rewritten as B. A leading selection now takes precedence, and an ordinary distractor reference is not an answer declaration. Common Markdown answer formatting is supported. The viewer itself displays `/latest-answer` verbatim; a request-order guard now prevents an older request's stream, completion, or error from overwriting a newer viewer answer.
+
+Rebuild/relaunch the Mac client and copy the updated `server.mjs` and `study-answer-logic.mjs` to the bridge machine, then restart the bridge. The split-label capture fix requires the updated Mac executable; the bridge cannot reconstruct choices already dropped by an older client. The UI, model, context, thinking settings, streaming behavior, and generation limits are unchanged.
 
 Multiple-choice prompts ask for the selected letter, choice text, and one short explanation; when uncertain, the model is instructed to choose the closest supported option. Fill-in-the-blank prompts ask for only the missing word or short phrase, with no answer letter. If a fill-in response repeats the completed sentence, the bridge extracts the blank using the question's surrounding text. If it returns only a question prefix or the missing span cannot be identified, the bridge retries once with thinking disabled and a stricter missing-term-only instruction; it never returns the original question prefix as the answer. Answers for multiple blanks are returned in order separated by semicolons. Short-answer prompts ask for a concise direct response. Automatic uncertainty retries run only for multiple-choice requests when no supplied choice can be matched and the response begins with an uncertainty or search refusal; fill-in requests use a separate retry only when answer extraction is unreliable.
 
-Ollama responses stream to the Mac popup and update the Windows viewer as answer text arrives. Fill-in responses are buffered until formatting is complete, then only the missing span is streamed, so a repeated question does not briefly appear in the UI. The existing `/study-answer` endpoint continues to return its JSON response for other clients. Bridge logs report time to first model token, prompt evaluation time, generation time, model load time, Ollama total time, and end-to-end time. Thinking text and screen content are excluded from logs and client output.
+Ollama responses stream to the Mac popup and update the Windows viewer as answer text arrives. Fill-in responses are buffered until formatting is complete, then only the missing span is streamed, so a repeated question does not briefly appear in the UI. The existing `/study-answer` endpoint continues to return its JSON response for other clients. Bridge logs report time to first model token, prompt evaluation time, generation time, model load time, Ollama total time, and end-to-end time. Thinking text is excluded from logs and client output; question and answer content appear in logs only when debugging is enabled.
 
 ## Endpoints
 

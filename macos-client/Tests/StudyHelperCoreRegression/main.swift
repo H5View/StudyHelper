@@ -178,4 +178,38 @@ precondition(
     "Connect Accessibility labels or page controls contaminated the fill-in question"
 )
 
-print("Mac extraction regressions passed: inline HTML inputs, selection recovery, fill-in prompts, stomata question, choices, and screen-control removal.")
+let fiveChoiceStem = "Which organelle carries out photosynthesis?"
+let fiveChoiceTexts = ["Nucleus", "Mitochondrion", "Chloroplast", "Ribosome", "Golgi apparatus"]
+let wrappedConfidenceControls = [
+    "Option 1: Rate your confidence to submit your answer.",
+    "Option 2: High", "Option 3: Medium", "Option 4: Low"
+]
+for labels in [["A", "B", "C", "D", "E"], ["(A)", "(B)", "(C)", "(D)", "(E)"]] {
+    let splitChoices = zip(labels, fiveChoiceTexts).flatMap { [$0.0, $0.1] }
+    let expected = [fiveChoiceStem] + splitChoices
+    precondition(
+        QuestionTextExtractor.extract(from: expected + wrappedConfidenceControls) == expected,
+        "five split A–E choices were numbered as eight options, truncated, or contaminated by confidence controls"
+    )
+}
+let fiveUnlabeledChoices = [fiveChoiceStem] + fiveChoiceTexts
+let nucleotideChoices = ["Which base pairs with thymine?", "(A)", "A", "(B)", "G", "(C)", "C", "(D)", "T"]
+precondition(
+    QuestionTextExtractor.extract(from: nucleotideChoices) == nucleotideChoices,
+    "one-letter choice values were confused with bare labels"
+)
+precondition(
+    QuestionTextExtractor.extract(from: fiveUnlabeledChoices + wrappedConfidenceControls) == [fiveChoiceStem] + fiveChoiceTexts.enumerated().map { "Option \($0.offset + 1): \($0.element)" },
+    "confidence controls were included in synthetic choices"
+)
+precondition(
+    QuestionTextExtractor.extract(from: [fiveChoiceStem, "A. A structure consisting of", "flattened sacs", "B. Another structure", "submit"]) == [fiveChoiceStem, "A. A structure consisting of", "flattened sacs", "B. Another structure"],
+    "wrapped choice text was lost or lowercase submit was appended"
+)
+let wrappedSplitChoices = [fiveChoiceStem, "A", "A structure consisting of", "flattened sacs", "B", "Another structure"]
+precondition(
+    QuestionTextExtractor.extract(from: wrappedSplitChoices + ["submit"]) == wrappedSplitChoices,
+    "a choice with a split bare label lost its wrapped text"
+)
+
+print("Mac extraction regressions passed: split A–E labels, five-choice capture, inline inputs, fill-in prompts, and screen-control removal.")
