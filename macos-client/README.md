@@ -20,8 +20,11 @@ swift run StudyHelperCoreRegression
 
 ```bash
 cd macos-client
-swift run StudyHelperMac
+sh build-app.sh
+open "$(swift build --show-bin-path -c release)/StudyHelper.app"
 ```
+
+Use the app bundle to run Screenshot Mode. It includes the screen-capture purpose string that macOS expects when requesting Screen Recording access.
 
 ## Current bridge configuration
 
@@ -32,7 +35,7 @@ The Windows bridge selects the Ollama model through its `OLLAMA_MODEL` setting. 
 
 ## Permissions
 
-Accessibility is required for selected-text capture and the clipboard fallback. Read Screen needs Screen Recording permission so macOS can capture the frontmost window for text recognition.
+Accessibility is required for selected-text capture and the clipboard fallback. Read Screen and Analyze Screenshot need Screen Recording permission.
 
 Path:
 
@@ -46,6 +49,7 @@ After enabling Screen Recording for StudyHelper, quit and reopen the Mac app.
 
 - `Status`
 - `Test Connection`
+- `Analyze Screenshot`
 - `Open Accessibility Settings`
 - `Open Screen Recording Settings`
 - `Answer Display`
@@ -72,6 +76,12 @@ Study answers stream into the existing Mac popup as the model produces answer te
 If Screen Recording access is missing, StudyHelper displays `Screen Recording required`. If the frontmost window contains no recognizable text, it displays `No readable screen text`. The selected input mode is saved with `UserDefaults` and survives app restarts.
 
 If an answer is unclear, choose `Copy Last Screen Text` from the SH menu after using Read Screen, then paste it into a text editor to inspect exactly what was sent to the bridge. The text is kept only in the running Mac app until you copy it.
+
+`Analyze Screenshot` captures the main display once when selected. It uses ScreenCaptureKit on macOS 14 and later and the existing public Core Graphics window capture API on macOS 13. StudyHelper's own app is excluded from ScreenCaptureKit captures. The image is resized to at most 2,048 pixels on its longest side, encoded as JPEG in memory, and sent to the authenticated `/study-answer/image` bridge endpoint. The image is not written to disk or included in logs. Gemma 4 receives it through Ollama's `messages[].images` base64 field. This menu action requires Screen Recording permission and does not use the system screenshot shortcut or create a floating thumbnail.
+
+The image endpoint accepts JPEG or PNG screenshots up to 4 MiB and uses the same output mode as text questions. The existing text routes and streaming behavior are unchanged. Screenshot answers use the same Mac popup, and Windows or Both output modes update the Windows answer viewer.
+
+The image endpoint body is `{ "image": "<base64>", "mimeType": "image/jpeg", "outputMode": "mac" }` with the existing `X-Study-Assistant-Token` header. Ollama receives the base64 image in the `images` array on the user message. The bridge validates image type and size before making the model request.
 
 ## Hotkey
 

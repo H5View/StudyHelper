@@ -1,4 +1,5 @@
 import Foundation
+import StudyHelperCore
 
 struct HealthStatus: Decodable {
     let bridge: String
@@ -168,6 +169,36 @@ struct BridgeClient {
             throw BridgeClientError.requestFailed
         }
         return finalAnswer
+    }
+
+    func fetchScreenshotAnswer(
+        for jpegData: Data,
+        outputMode: AnswerDisplayMode
+    ) async throws -> String {
+        guard !jpegData.isEmpty, jpegData.count <= 4 * 1_024 * 1_024 else {
+            throw BridgeClientError.requestFailed
+        }
+
+        let url = configuration.bridgeBaseURL.appending(path: "study-answer/image")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = configuration.studyAnswerRequestTimeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(configuration.studyToken, forHTTPHeaderField: "X-Study-Assistant-Token")
+        request.httpBody = try JSONEncoder().encode(
+            ScreenshotStudyRequest(image: jpegData, mimeType: "image/jpeg", outputMode: outputMode.rawValue)
+        )
+
+        debugLog("study-answer image started bytes=\(jpegData.count) mimeType=image/jpeg timeout=\(Int(configuration.studyAnswerRequestTimeout))s mode=\(outputMode.rawValue)")
+        let (data, response) = try await perform(request, kind: .studyAnswer)
+        let httpResponse = try requireHTTPResponse(response)
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw mapBridgeError(statusCode: httpResponse.statusCode, data: data)
+        }
+        let decoded = try JSONDecoder().decode(StudyAnswerResponse.self, from: data)
+        let answer = decoded.answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !answer.isEmpty else { throw BridgeClientError.requestFailed }
+        return answer
     }
 
     private func fetchStudyAnswerJSON(_ text: String, outputMode: AnswerDisplayMode) async throws -> String {

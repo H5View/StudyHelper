@@ -11,6 +11,7 @@ final class AppController: NSObject {
     private let configuration = AppConfiguration()
     private lazy var bridgeClient = BridgeClient(configuration: configuration)
     private let selectionCaptureService = SelectionCaptureService()
+    private let screenshotCaptureService = ScreenshotCaptureService()
     private let popupController = PopupController()
     private var hotKeyMonitor: HotKeyMonitor?
     private var statusItem: NSStatusItem?
@@ -65,6 +66,12 @@ final class AppController: NSObject {
         menu.addItem(
             withTitle: "Test Connection",
             action: #selector(testConnection),
+            keyEquivalent: ""
+        ).target = self
+
+        menu.addItem(
+            withTitle: "Analyze Screenshot",
+            action: #selector(analyzeScreenshot),
             keyEquivalent: ""
         ).target = self
 
@@ -249,6 +256,12 @@ final class AppController: NSObject {
 
     private func message(for error: Error) -> String {
         switch error {
+        case ScreenshotCaptureError.screenRecordingRequired:
+            return "Screen Recording required"
+        case ScreenshotCaptureError.captureFailed:
+            return "Screenshot capture failed"
+        case ScreenshotCaptureError.encodingFailed:
+            return "Screenshot could not be prepared"
         case SelectionCaptureError.accessibilityRequired:
             return "Accessibility required"
         case SelectionCaptureError.noTextSelected:
@@ -265,6 +278,53 @@ final class AppController: NSObject {
             return "Model unavailable"
         default:
             return "Request failed"
+        }
+    }
+
+    @objc
+    private func analyzeScreenshot() {
+        latestRequestID = UUID()
+        let requestID = latestRequestID
+        let outputMode = answerDisplayMode
+
+        activeRequest?.cancel()
+        if outputMode.sendsPopupToMac {
+            popupController.showLoading(text: "Capturing screen…")
+        } else {
+            popupController.dismiss()
+        }
+        updateStatus(text: "Analyzing screenshot…")
+
+        activeRequest = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let jpegData = try await self.screenshotCaptureService.captureJPEG()
+                try Task.checkCancellation()
+                if outputMode.sendsPopupToMac {
+                    self.popupController.showLoading(text: "Finding answer…")
+                }
+
+                let answer = try await self.bridgeClient.fetchScreenshotAnswer(
+                    for: jpegData,
+                    outputMode: outputMode
+                )
+                try Task.checkCancellation()
+
+                guard self.latestRequestID == requestID else { return }
+                if outputMode.sendsPopupToMac {
+                    self.popupController.showMessage(answer, autoDismissAfter: self.configuration.popupDuration)
+                } else {
+                    self.popupController.dismiss()
+                }
+                self.updateStatus(text: "Ready")
+            } catch is CancellationError {
+                guard self.latestRequestID == requestID else { return }
+                self.updateStatus(text: "Ready")
+            } catch {
+                guard self.latestRequestID == requestID else { return }
+                self.popupController.showMessage(self.message(for: error), autoDismissAfter: self.configuration.popupDuration)
+                self.updateStatus(text: "Ready")
+            }
         }
     }
 

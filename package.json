@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.mjs",
     "check": "node --check server.mjs",
-    "test": "node --test test/study-answer-logic.test.mjs",
+    "test": "node --test test/study-answer-logic.test.mjs test/image-request.test.mjs",
     "test:integration": "node test/server-integration.mjs && node --test test/multiple-choice-integration.test.mjs"
   }
 }

@@ -280,6 +280,42 @@ try {
   assert.doesNotMatch(logs, /Option 1: # School/);
   assert.equal(logs.includes('sample.student@example.test'), false, 'opt-in trace did not redact email');
   assert.equal(logs.includes('PRIVATE_TRACE'), false, 'hidden thinking was logged');
+  const screenshotBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x53, 0x48, 0x01, 0x02, 0xff, 0xd9]);
+  const screenshotBase64 = screenshotBytes.toString('base64');
+  const callsBeforeInvalidScreenshot = calls.length;
+  const invalidScreenshot = await fetch(`http://127.0.0.1:${bridgePort}/study-answer/image`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-study-assistant-token': 'integration-test-token' },
+    body: JSON.stringify({ image: screenshotBase64, mimeType: 'image/png', outputMode: 'both' })
+  });
+  assert.equal(invalidScreenshot.status, 400, 'mismatched screenshot MIME type should be rejected');
+  assert.equal(calls.length, callsBeforeInvalidScreenshot, 'invalid screenshots must not reach Ollama');
+
+  const unauthorizedScreenshot = await fetch(`http://127.0.0.1:${bridgePort}/study-answer/image`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ image: screenshotBase64, mimeType: 'image/jpeg', outputMode: 'both' })
+  });
+  assert.equal(unauthorizedScreenshot.status, 401, 'screenshot endpoint must use the existing bridge token');
+  assert.equal(calls.length, callsBeforeInvalidScreenshot, 'unauthorized screenshots must not reach Ollama');
+
+  const screenshotResponse = await fetch(`http://127.0.0.1:${bridgePort}/study-answer/image`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-study-assistant-token': 'integration-test-token' },
+    body: JSON.stringify({ image: screenshotBase64, mimeType: 'image/jpeg', outputMode: 'both' })
+  });
+  assert.equal(screenshotResponse.status, 200);
+  assert.deepEqual(await screenshotResponse.json(), { answer: 'D — stomata. Stomata allow carbon dioxide to enter the leaf.' });
+  assert.equal(calls.at(-1).model, 'gemma4:12b-it-q4_K_M');
+  assert.deepEqual(calls.at(-1).messages.at(-1).images, [screenshotBase64], 'Ollama must receive screenshot bytes in its images array');
+  assert.match(calls.at(-1).messages.at(-1).content, /Analyze this screenshot of a study question/);
+  assert.match(calls.at(-1).messages[0].content, /question visible in the supplied screenshot/);
+  assert.equal(calls.at(-1).think, false, 'automatic thinking settings should keep simple screenshot requests concise');
+  const screenshotViewer = await (await fetch(`http://127.0.0.1:${bridgePort}/latest-answer`)).json();
+  assert.equal(screenshotViewer.answer, 'D — stomata. Stomata allow carbon dioxide to enter the leaf.');
+  assert.equal(screenshotViewer.outputMode, 'both');
+  assert.equal(screenshotViewer.status, 'ready');
+  assert.equal(logs.includes(screenshotBase64), false, 'screenshot contents must not appear in bridge logs');
   console.log('Bridge integration regressions passed: Mac capture extraction, final fill-in output, model/context, thinking, retries, hidden thinking, choices, and input privacy.');
 } finally {
   bridge.kill('SIGTERM');
