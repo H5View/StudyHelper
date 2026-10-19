@@ -1,13 +1,6 @@
 import Foundation
 import StudyHelperCore
 
-let screenshotBytes = Data([0xff, 0xd8, 0xff, 0xd9])
-let screenshotRequest = ScreenshotStudyRequest(image: screenshotBytes, mimeType: "image/jpeg", outputMode: "both")
-let screenshotJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(screenshotRequest)) as? [String: String]
-precondition(screenshotJSON?["image"] == screenshotBytes.base64EncodedString(), "screenshot bytes were not base64 encoded for the bridge")
-precondition(screenshotJSON?["mimeType"] == "image/jpeg", "screenshot MIME type was not sent to the bridge")
-precondition(screenshotJSON?["outputMode"] == "both", "screenshot request lost its output mode")
-
 let stomataQuestion = "Plant leaves contain small openings called ________, through which carbon dioxide enters the plant."
 let stomataInput = [
     "File Edit View Insert Format",

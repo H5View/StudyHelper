@@ -3,7 +3,6 @@ import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { formatFillInAnswer, getThinkingDecision, matchAnswerToChoices, parseChoiceGroups, redactInputForDebug, resolveAnswer, sanitizeQuestionInput } from './study-answer-logic.mjs';
 import { readOllamaEventStream } from './ollama-stream.mjs';
-import { MAX_SCREENSHOT_BYTES, validateScreenshotRequest } from './image-request.mjs';
 
 const env = loadEnvFile();
 
@@ -15,7 +14,6 @@ const OLLAMA_MODEL = env.OLLAMA_MODEL || 'gemma4:12b-it-q4_K_M';
 const OLLAMA_TIMEOUT_MS = parsePositiveInt(env.OLLAMA_TIMEOUT_MS, 600000);
 const OLLAMA_NUM_CTX = parsePositiveInt(env.OLLAMA_NUM_CTX, 8192);
 const MAX_INPUT_LENGTH = parsePositiveInt(env.STUDY_ASSISTANT_MAX_INPUT_LENGTH, 16000);
-const MAX_IMAGE_REQUEST_BYTES = Math.ceil(MAX_SCREENSHOT_BYTES * 4 / 3) + 64 * 1024;
 const OLLAMA_KEEP_ALIVE = env.OLLAMA_KEEP_ALIVE || '5m';
 const OLLAMA_THINKING_MODE = normalizeThinkingMode(env.OLLAMA_THINKING_MODE);
 const OLLAMA_NUM_PREDICT = parsePositiveInt(env.OLLAMA_NUM_PREDICT, 256);
@@ -134,38 +132,6 @@ const server = createServer(async (req, res) => {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(VIEWER_HTML);
       return;
-    }
-
-    if (req.method === 'POST' && req.url === '/study-answer/image') {
-      if (!isAuthorized(req)) {
-        return sendJson(res, 401, { error: 'Unauthorized' });
-      }
-
-      const body = await readJsonBody(req, MAX_IMAGE_REQUEST_BYTES);
-      const screenshot = validateScreenshotRequest(body);
-      const requestId = ++nextStudyRequestId;
-      const outputMode = normalizeOutputMode(body.outputMode);
-      const shouldShowOnWindows = outputMode === 'windows' || outputMode === 'both';
-
-      if (shouldShowOnWindows) {
-        latestViewerRequestId = requestId;
-        setLatestAnswerState('Finding answer...', outputMode, 'working', requestId);
-      }
-
-      let answer;
-      try {
-        answer = await generateImageAnswer(screenshot, requestId);
-      } catch (error) {
-        if (shouldShowOnWindows) {
-          setLatestAnswerState('Request failed', outputMode, 'error', requestId);
-        }
-        throw error;
-      }
-
-      if (shouldShowOnWindows) {
-        setLatestAnswerState(answer, outputMode, 'ready', requestId);
-      }
-      return sendJson(res, 200, { answer });
     }
 
     if (req.method === 'POST' && ['/study-answer', '/study-answer/stream'].includes(req.url)) {
@@ -388,35 +354,6 @@ async function generateAnswer(text, requestId, handlers = {}) {
   }
 }
 
-async function generateImageAnswer(screenshot, requestId) {
-  const prompt = [
-    'Analyze this screenshot of a study question. Read the full question and all answer choices, and use any visible diagram, graph, table, or image as evidence.',
-    'Answer the relevant question directly and concisely.',
-    'For multiple choice, begin with the displayed answer label and choice text, followed by one short explanation.',
-    'For fill-in-the-blank, return only the missing word or shortest phrase.',
-    'For other questions, use one short direct answer. If the screenshot has no readable study question, say so briefly.'
-  ].join(' ');
-  const think = OLLAMA_THINKING_MODE === 'on';
-  console.log(
-    `study-answer image started requestId=${requestId} mimeType=${screenshot.mimeType} imageBytes=${screenshot.byteLength} think=${think} num_ctx=${OLLAMA_NUM_CTX} num_predict=${OLLAMA_NUM_PREDICT}`
-  );
-  const startedAt = performance.now();
-  try {
-    return await requestModel(
-      prompt,
-      'Use only the question visible in the supplied screenshot. Ignore unrelated interface text. Do not browse or recommend outside research. Keep the final answer concise and follow the requested answer format.',
-      requestId,
-      'image',
-      think,
-      undefined,
-      OLLAMA_NUM_PREDICT,
-      [screenshot.image]
-    );
-  } finally {
-    console.log(`study-answer image finished requestId=${requestId} elapsedMs=${Math.round(performance.now() - startedAt)}`);
-  }
-}
-
 function buildSystemPrompt(questionType, text) {
   const shared = [
     'Use only the supplied question text; do not browse or recommend outside research.',
@@ -460,12 +397,7 @@ function buildFillInRetryPrompt() {
   ].join(' ');
 }
 
-async function requestModel(text, systemPrompt, requestId, attempt, think, onContent, numPredict = null, images = []) {
-  const userMessage = {
-    role: 'user',
-    content: text
-  };
-  if (images.length > 0) userMessage.images = images;
+async function requestModel(text, systemPrompt, requestId, attempt, think, onContent, numPredict = null) {
   const payload = {
     model: OLLAMA_MODEL,
     stream: true,
@@ -481,7 +413,10 @@ async function requestModel(text, systemPrompt, requestId, attempt, think, onCon
         role: 'system',
         content: systemPrompt
       },
-      userMessage
+      {
+        role: 'user',
+        content: text
+      }
     ]
   };
 
@@ -604,13 +539,13 @@ async function checkOllama() {
   }
 }
 
-async function readJsonBody(req, maxBytes = MAX_INPUT_LENGTH * 4) {
+async function readJsonBody(req) {
   const chunks = [];
   let totalLength = 0;
 
   for await (const chunk of req) {
     totalLength += chunk.length;
-    if (totalLength > maxBytes) {
+    if (totalLength > MAX_INPUT_LENGTH * 4) {
       throw createHttpError(413, 'Request body is too large.', true);
     }
     chunks.push(chunk);
